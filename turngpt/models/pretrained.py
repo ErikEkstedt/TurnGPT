@@ -142,6 +142,9 @@ class TurnGPTModel(nn.Module):
 
         return {"z": hidden_states}
 
+    def lm_head(self, z):
+        return self.model.lm_head(z)
+
     def forward(
         self,
         input_ids,
@@ -173,9 +176,20 @@ class TurnGPTModel(nn.Module):
 
 
 class TurnGPTPretrained(TurnGPT):
-    def __init__(self, n_vocab, pad_idx, dropout=0.1, pretrained="gpt2", **kwargs):
+    def __init__(
+        self,
+        n_vocab,
+        pad_idx=None,
+        sp1_idx=None,
+        sp2_idx=None,
+        dropout=0.1,
+        pretrained="gpt2",
+        **kwargs,
+    ):
         super().__init__()
         self.pad_idx = pad_idx
+        self.sp1_idx = sp1_idx
+        self.sp2_idx = sp2_idx
 
         self.model = TurnGPTModel(
             n_vocab=n_vocab,

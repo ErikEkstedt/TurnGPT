@@ -77,6 +77,8 @@ class TurnGPTDM(pl.LightningDataModule):
             )
 
         self.pad_idx = self.tokenizer.pad_token_id
+        self.sp1_idx = self.tokenizer.convert_tokens_to_ids("<speaker1>")
+        self.sp2_idx = self.tokenizer.convert_tokens_to_ids("<speaker2>")
         self.builders = create_builders(hparams)
 
     def prepare_data(self):

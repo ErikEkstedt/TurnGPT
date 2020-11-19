@@ -90,6 +90,8 @@ def main(args):
         model = TurnGPTPretrained(
             n_vocab=len(dm.tokenizer),
             pad_idx=dm.tokenizer.pad_token_id,
+            sp1_idx=dm.sp1_idx,
+            sp2_idx=dm.sp2_idx,
             **vars(args),
         )
     elif args.model == "rnn":

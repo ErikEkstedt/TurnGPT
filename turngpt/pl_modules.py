@@ -144,6 +144,44 @@ class TurnGPT(pl.LightningModule):
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         return loss
 
+    def loss_function_turn_shift(self, logits, labels):
+        # print("logits: ", tuple(logits.shape))
+        # print("labels: ", tuple(labels.shape))
+        sp_prob = F.softmax(logits, dim=-1)
+        sp_prob = torch.stack(
+            (sp_prob[..., self.sp1_idx], sp_prob[..., self.sp2_idx]), dim=-1
+        )
+        # print("sp_prob: ", tuple(sp_prob.shape))
+        sp_prob = sp_prob.max(dim=-1).values
+        sp_prob = torch.stack((sp_prob, 1 - sp_prob), dim=-1)
+        # print("sp_prob: ", tuple(sp_prob.shape))
+        sp_prob = sp_prob.view(-1, sp_prob.size(-1))
+        # print("sp_prob: ", tuple(sp_prob.shape))
+        # print(sp_prob[:10])
+
+        sp_labels = (labels == self.sp1_idx).float()
+        sp_labels[labels == self.sp2_idx] = 1
+        sp_labels = torch.stack((sp_labels, 1 - sp_labels), dim=-1)
+        # print("sp_labels: ", tuple(sp_labels.shape))
+        sp_labels = sp_labels.view(-1, sp_labels.size(-1))
+        # print("sp_labels: ", tuple(sp_labels.shape))
+        # print(sp_labels[:10])
+
+        if self.pad_idx is not None:
+            sp_labels = sp_labels[labels.view(-1) != self.pad_idx]
+            sp_prob = sp_prob[labels.view(-1) != self.pad_idx]
+            # print("sp_labels: ", tuple(sp_labels.shape))
+            # print("sp_probs: ", tuple(sp_prob.shape))
+            # sp_labels[labels == self.pad_idx] = -100
+        # loss = sp_labels
+        # loss = F.binary_cross_entropy(
+        #     sp_prob.view(-1, sp_prob.size(-1)), sp_labels.view(-1)
+        # )
+        loss = F.binary_cross_entropy(sp_prob, sp_labels)
+        # print(loss)
+        # input()
+        return loss
+
     def training_step(self, batch, *args, **kwargs):
         input_ids, speaker_ids = batch[0], batch[1]
         # if self.hparams.general_turn_shift_token:
@@ -155,6 +193,7 @@ class TurnGPT(pl.LightningModule):
         speaker_ids = speaker_ids[:, :-1].contiguous()
         output = self(input_ids, speaker_ids)
         loss = self.loss_function(output["logits"], labels)
+        sp_loss = self.loss_function_turn_shift(output["logits"], labels)
 
         self.log(
             "train_loss", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True
@@ -162,6 +201,14 @@ class TurnGPT(pl.LightningModule):
         self.log(
             "avg_train_loss",
             loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            "avg_train_sp_loss",
+            sp_loss,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -184,5 +231,7 @@ class TurnGPT(pl.LightningModule):
         speaker_ids = speaker_ids[:, :-1].contiguous()
         output = self(input_ids, speaker_ids)
         loss = self.loss_function(output["logits"], labels)
+        sp_loss = self.loss_function_turn_shift(output["logits"], labels)
         self.log("val_loss", loss)
-        return {"val_loss": loss}
+        self.log("val_sp_loss", sp_loss)
+        return {"val_loss": loss, "val_sp_loss": sp_loss}

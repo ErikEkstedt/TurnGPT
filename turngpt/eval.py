@@ -45,7 +45,7 @@ def load():
     parser.add_argument(
         "--split",
         type=str,
-        default="train",  # val, test
+        default="all",  # val, train, test, als
     )
     temp_args, _ = parser.parse_known_args()
 
@@ -70,6 +70,15 @@ def load():
         from turngpt.models.pretrained import TurnGPTPretrained
 
         model = TurnGPTPretrained.load_from_checkpoint(checkpoint_path=args.checkpoint)
+
+    # in between updates but should be there by default in the future
+    if not hasattr(model, "sp1_idx") or getattr(model, "sp1_idx") is None:
+        model.sp1_idx = dm.sp1_idx
+        print("added sp1_idx")
+
+    if not hasattr(model, "sp2_idx") or getattr(model, "sp2_idx") is None:
+        model.sp2_idx = dm.sp2_idx
+        print("added sp2_idx")
 
     return model, dm, args
 
@@ -120,17 +129,21 @@ class TurnGPTEval(pl.LightningModule):
 
         with torch.no_grad():
             total_loss = []
+            sp_loss = []
             for b in tqdm(dloader, desc="perplexity"):
                 o = self.model.validation_step(
                     [b[0].to(self.device), b[1].to(self.device)]
                 )
                 total_loss.append(o["val_loss"])
+                sp_loss.append(o["val_sp_loss"])
             total_loss = torch.stack(total_loss)
-            loss_sd = total_loss.std().item()
             loss = total_loss.mean().item()
+            sp_loss = torch.stack(sp_loss)
+            sp_loss = sp_loss.mean().item()
+            # loss_sd = total_loss.std().item()
 
-        ppl = math.exp(loss)
-        return loss, ppl
+        # ppl = math.exp(loss)
+        return {"loss": loss, "sp_loss": sp_loss}
 
     @torch.no_grad()
     def classification(self, test_dataloader):
@@ -664,8 +677,8 @@ class TurnGPTEval(pl.LightningModule):
         )
         parser.add_argument(
             "--classification",
-            type=bool,
-            default=True,
+            action="store_true",
+            default=False,
         )
         parser.add_argument(
             "--context_ablation",
@@ -884,11 +897,26 @@ if __name__ == "__main__":
 
     if args.perplexity:
         # ce_loss, ppl = perplexity(model, dm, args)
-        ce_loss, ppl = evaluation_model.cross_entropy(test_dataloader)
+        result = evaluation_model.cross_entropy(test_dataloader)
+
+        ce_loss = result["loss"]
+        ppl = math.exp(ce_loss)
+        sp_bce_loss = result["sp_loss"]
+        sp_ppl = math.exp(sp_bce_loss)
         print("split: ", args.split)
         print("avg CE loss: ", ce_loss)
         print("ppl (nats): ", ppl)
-        write_txt([f"ce_loss: {ce_loss}", f"ppl: {ppl}"], join(savepath, "loss.txt"))
+        print("avg sp BCE loss: ", sp_bce_loss)
+        print("ppl sp (nats): ", sp_ppl)
+        write_txt(
+            [
+                f"ce_loss: {ce_loss}",
+                f"ppl: {ppl}",
+                f"speaker ce_loss: {sp_bce_loss}",
+                f"speaker ppl: {sp_ppl}",
+            ],
+            join(savepath, "loss.txt"),
+        )
 
     if args.classification:
         score = evaluation_model.classification(test_dataloader)

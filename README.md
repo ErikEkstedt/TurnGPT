@@ -40,8 +40,9 @@ python turngpt/eval.py \
   --datasets persona \
   --chunk_size 512 \
   --batch_size 2 \
-  --context_ablation \  (optional)
-  --context_attention \ (optional)
-  --context_ig \        (optional)
-  --prediction_hist \   (optional)
+  --classification \    # bAcc (optional) 
+  --context_ablation \  # (optional)
+  --context_attention \ # (optional)
+  --context_ig \        # (optional)
+  --prediction_hist \   # (optional)
 ```
