@@ -122,36 +122,53 @@ class Block(nn.Module):
 class GPT(nn.Module):
     """  the full GPT language model, with a context size of block_size """
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        n_vocab,
+        n_embd,
+        n_head,
+        n_layer,
+        embd_pdrop,
+        resid_pdrop,
+        attn_pdrop,
+        use_speaker_emb,
+        chunk_size,
+    ):
         super().__init__()
 
-        self.use_speaker_emb = config.use_speaker_emb
-        self.predict_speaker_emb = config.use_speaker_emb
+        self.config = GPTConfig(
+            vocab_size=n_vocab,
+            n_embd=n_embd,
+            n_head=n_head,
+            n_layer=n_layer,
+            embd_pdrop=embd_pdrop,
+            resid_pdrop=resid_pdrop,
+            attn_pdrop=attn_pdrop,
+            use_speaker_emb=use_speaker_emb,
+            block_size=chunk_size,
+        )
+        self.block_size = self.config.block_size
+        self.use_speaker_emb = use_speaker_emb
+        self.n_embd = self.config.n_embd
+        self.n_layer = self.config.n_layer
+        self.n_head = self.config.n_head
 
         # input embedding stem
-        self.tok_emb = nn.Embedding(config.vocab_size, config.n_embd)
-        self.pos_emb = nn.Parameter(torch.zeros(1, config.block_size, config.n_embd))
-        self.drop = nn.Dropout(config.embd_pdrop)
+        self.tok_emb = nn.Embedding(n_vocab, n_embd)
+        self.pos_emb = nn.Parameter(torch.zeros(1, self.config.block_size, n_embd))
+        self.drop = nn.Dropout(embd_pdrop)
 
         # transformer
-        self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
+        self.blocks = nn.Sequential(*[Block(self.config) for _ in range(n_layer)])
 
         # decoder head
-        self.ln_f = nn.LayerNorm(config.n_embd)
-        self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-
-        if self.predict_speaker_emb:
-            self.speaker_head = nn.Linear(config.n_embd, 2, bias=False)
-
-        self.block_size = config.block_size
+        self.ln_f = nn.LayerNorm(n_embd)
+        self.head = nn.Linear(n_embd, n_vocab, bias=False)
         self.apply(self._init_weights)
 
         logger.info(
             "number of parameters: %e", sum(p.numel() for p in self.parameters())
         )
-
-    def get_size(self):
-        return sum(p.numel() for p in self.parameters())
 
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding)):
@@ -161,6 +178,9 @@ class GPT(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+
+    def get_size(self):
+        return sum(p.numel() for p in self.parameters())
 
     def get_block_size(self):
         return self.block_size
@@ -183,67 +203,34 @@ class GPT(nn.Module):
         x = self.drop(total_emb)
         return x
 
-    def transformer(self, idx, speaker_ids=None):
-        x = self.embedding(idx, speaker_ids)
+    def body(self, input_ids, speaker_ids, **kwargs):
+        x = self.embedding(input_ids, speaker_ids)
         x = self.blocks(x)
         x = self.ln_f(x)
         return x
 
     def forward(self, idx, speaker_ids=None):
-        z = self.transformer(idx, speaker_ids)
+        z = self.body(idx, speaker_ids)
         output = {"z": z}
         output["logits"] = self.head(z)
         return output
 
-
-class TurnGPTMini(TurnGPT):
-    def __init__(
-        self,
-        n_vocab: int,
-        pad_idx: int,
-        chunk_size: int = 512,
-        n_embd: int = 256,
-        n_head: int = 8,
-        n_layer: int = 4,
-        lr: float = 1e-3,
-        **kwargs,
-    ):
-        super().__init__()
-
-        self.chunk_size = chunk_size
-        self.n_vocab = n_vocab
-        self.n_embd = n_embd
-        self.n_head = n_head
-        self.n_layer = n_layer
-        self.pad_idx = pad_idx
-        self.lr = lr
-
-        self.model_config = GPTConfig(
-            vocab_size=n_vocab,
-            block_size=chunk_size,
-            n_embd=n_embd,
-            n_head=n_head,
-            n_layer=n_layer,
-        )
-        self.model = GPT(self.model_config)
-        self.save_hyperparameters()
-
-    def configure_optimizers(self):
-        return torch.optim.AdamW(self.model.parameters(), lr=self.lr)
-
     @staticmethod
     def add_model_specific_args(parent_parser):
         """ Specify the hyperparams for this LightningModule """
-        parser = ArgumentParser(parents=[parent_parser], add_help=False)
+        parser = ArgumentParser(
+            parents=[parent_parser], conflict_handler="resolve", add_help=False
+        )
 
         # Model
         parser.add_argument("--n_embd", default=256, type=int)
         parser.add_argument("--n_head", default=8, type=int)
         parser.add_argument("--n_layer", default=8, type=int)
+        parser.add_argument("--embd_pdrop", default=0.1, type=float)
+        parser.add_argument("--resid_pdrop", default=0.1, type=float)
+        parser.add_argument("--attn_pdrop", default=0.1, type=float)
+        parser.add_argument("--use_speaker_emb", default=True, type=bool)
         parser.add_argument("--chunk_size", default=512, type=int)
-
-        # Training
-        parser.add_argument("--learning_rate", default=1e-4, type=float)
         return parser
 
 
@@ -266,7 +253,7 @@ if __name__ == "__main__":
         )
     ).unsqueeze(0)
     speaker_ids = torch.tensor(
-        tokenizer.encode(["<speaker1>"] * x.shape[-1])
+        tokenizer.encode(["<speaker1>"] * input_ids.shape[-1])
     ).unsqueeze(0)
 
     y = input_ids[:, 1:].contiguous()

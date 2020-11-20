@@ -24,6 +24,9 @@ class TurnGPTModel(nn.Module):
         )
         self.config = self.model.config
         self.block_size = self.config.n_positions
+        self.n_embd = self.config.n_embd
+        self.n_head = self.config.n_head
+        self.n_layer = self.config.n_layer
 
         if n_vocab is not None:
             self.extend_embeddings(n_vocab)
@@ -75,7 +78,6 @@ class TurnGPTModel(nn.Module):
         output_hidden_states=False,
         use_cache=False,
     ):
-        # transformer_outputs: last hidden state, (presents), (all hidden_states), (attentions)
         transformer_outputs = self.model.transformer(
             input_ids,
             token_type_ids=speaker_ids,
@@ -83,6 +85,7 @@ class TurnGPTModel(nn.Module):
             output_hidden_states=output_hidden_states,
             use_cache=use_cache,
         )
+        # outputs: last hidden state, (presents), (all hidden_states), (attentions)
         outputs = {"z": transformer_outputs[0]}
         i = 1
         if use_cache:
@@ -99,13 +102,6 @@ class TurnGPTModel(nn.Module):
 
     def body_from_embedding(self, inputs_embeds, speaker_ids):
         input_shape = inputs_embeds.size()[:-1]
-
-        # Prepare head mask if needed
-        # 1.0 in head_mask indicate we keep the head
-        # attention_probs has shape bsz x n_heads x N x N
-        # head_mask has shape n_layer x batch x n_heads x N x N
-        # head_mask = self.model.get_head_mask(None, self.model.config.n_layer)
-        # print("head mask: ", head_mask)
 
         # Position Embeddings
         position_ids = torch.arange(
@@ -174,52 +170,12 @@ class TurnGPTModel(nn.Module):
         outputs["logits"] = self.model.lm_head(outputs["z"])
         return outputs
 
-
-class TurnGPTPretrained(TurnGPT):
-    def __init__(
-        self,
-        n_vocab,
-        pad_idx=None,
-        sp1_idx=None,
-        sp2_idx=None,
-        dropout=0.1,
-        pretrained="gpt2",
-        **kwargs,
-    ):
-        super().__init__()
-        self.pad_idx = pad_idx
-        self.sp1_idx = sp1_idx
-        self.sp2_idx = sp2_idx
-
-        self.model = TurnGPTModel(
-            n_vocab=n_vocab,
-            dropout=dropout,
-            pretrained=pretrained,
-        )
-
-        self.chunk_size = self.model.config.n_positions
-        self.n_embd = self.model.config.n_embd
-        self.n_head = self.model.config.n_head
-        self.n_layer = self.model.config.n_layer
-
-        # save
-        self.save_hyperparameters()
-
-    def configure_optimizers(self):
-        return AdamW(
-            self.model.parameters(), lr=self.hparams.learning_rate, correct_bias=True
-        )
-
     @staticmethod
     def add_model_specific_args(parent_parser):
         """ Specify the hyperparams for this LightningModule """
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
 
-        # Model
+        # Model Specific
         parser.add_argument("--pretrained", type=str, default="gpt2")
-        parser.add_argument("--dropout", type=float, default=0.1)
-        parser.add_argument("--chunk_size", type=int, default=512)
-
-        # Training
-        parser.add_argument("--learning_rate", default=1e-4, type=float)
+        parser.add_argument("--optimizer", type=str, default="adamw")
         return parser

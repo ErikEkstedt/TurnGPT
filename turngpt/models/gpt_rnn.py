@@ -9,6 +9,8 @@ from turngpt.pl_modules import TurnGPT
 class RNN(nn.Module):
     def __init__(self, n_vocab, n_embd, n_layer, dropout=0.1, rnn="lstm"):
         super().__init__()
+        self.n_emdb = n_embd
+        self.n_layer = n_layer
 
         if rnn.lower() == "lstm":
             rnn = nn.LSTM
@@ -33,7 +35,6 @@ class RNN(nn.Module):
             module.weight.data.fill_(1.0)
 
     def forward(self, idx, speaker_ids=None):
-
         emb = self.embedding(idx)
         if speaker_ids is not None:
             emb += self.embedding(speaker_ids)
@@ -42,37 +43,6 @@ class RNN(nn.Module):
         output = {"z": z}
         output["logits"] = self.head(z)
         return output
-
-
-class TurnGPTRnn(TurnGPT):
-    def __init__(
-        self,
-        n_vocab: int,
-        pad_idx: int,
-        chunk_size: int = 512,
-        n_embd: int = 256,
-        n_head: int = 8,
-        n_layer: int = 4,
-        dropout: float = 0.1,
-        rnn: str = "lstm",
-        lr: float = 1e-3,
-        **kwargs,
-    ):
-        super().__init__()
-
-        self.chunk_size = chunk_size
-        self.n_vocab = n_vocab
-        self.n_embd = n_embd
-        self.n_head = n_head
-        self.n_layer = n_layer
-        self.pad_idx = pad_idx
-        self.lr = lr
-
-        self.model = RNN(n_vocab, n_embd, n_layer, dropout, rnn)
-        self.save_hyperparameters()
-
-    def configure_optimizers(self):
-        return torch.optim.AdamW(self.model.parameters(), lr=self.lr)
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -83,9 +53,4 @@ class TurnGPTRnn(TurnGPT):
         parser.add_argument("--n_embd", default=768, type=int)
         parser.add_argument("--n_layer", default=3, type=int)
         parser.add_argument("--rnn", default="LSTM", type=str)
-        parser.add_argument("--dropout", default=0.3, type=float)
-        parser.add_argument("--chunk_size", default=128, type=int)
-
-        # Training
-        parser.add_argument("--learning_rate", default=1e-4, type=float)
         return parser
