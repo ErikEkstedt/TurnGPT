@@ -13,47 +13,126 @@ from ttd.basebuilder import add_builder_specific_args
 from ttd.utils import get_run_dir
 
 from turngpt.turngpt_dm import TurnGPTDM
-
 from turngpt.proximity_loss import proximity_loss
+from turngpt.models.pretrained import TurnGPTModel
+from turngpt.models.gpt_mini import GPT
+from turngpt.models.proximity import ProxTransformer
+from turngpt.models.proximity import ProxRNN
+
+
+from transformers import AdamW
+
+
+def build_lm_model(args, n_vocab):
+    if args.model == "pretrained":
+        from turngpt.models.pretrained import TurnGPTModel
+
+        lm = TurnGPTModel(
+            n_vocab=n_vocab,
+            dropout=args.dropout,
+            pretrained=args.pretrained,
+        )
+    elif args.model == "mini":
+
+        lm = GPT(
+            n_vocab=n_vocab,
+            n_embd=args.n_embd,
+            n_head=args.n_head,
+            n_layer=args.n_layer,
+            embd_pdrop=args.embd_pdrop,
+            resid_pdrop=args.resid_pdrop,
+            attn_pdrop=args.attn_pdrop,
+            use_speaker_emb=args.use_speaker_emb,
+            chunk_size=args.chunk_size,
+        )
+    elif args.model == "rnn":
+        from turngpt.models.gpt_rnn import RNN
+
+        lm = RNN(
+            n_vocab=n_vocab,
+            n_embd=args.n_embd,
+            n_layer=args.n_layer,
+            dropout=args.dropout,
+            rnn=args.rnn,
+        )
+    else:
+        raise NotImplementedError
+    return lm
+
+
+def build_proximity_model(args, lm_model_n_embd):
+    if args.proximity_model == "transformer":
+        proximity_model = ProxTransformer(
+            input_size=lm_model_n_embd,
+            output_size=args.prox_output,
+            hidden_size=args.prox_hidden,
+            n_layer=args.prox_layers,
+            n_head=args.prox_heads,
+            resid_pdrop=args.prox_resid_pdrop,
+            attn_pdrop=args.prox_attn_pdrop,
+            chunk_size=args.chunk_size,
+        )
+    elif args.proximity_model == "rnn":
+        model = ProxRNN(
+            input_size=lm_model_n_embd,
+            hidden_size=args.prox_hidden,
+            output_size=args.prox_output,
+            num_layers=args.prox_layers,
+        )
+    else:
+        proximity_model = None
+    return proximity_model
 
 
 class TurnGPT(pl.LightningModule):
     def __init__(
         self,
-        LM,
-        proximity_model=None,
+        n_vocab=50259,
         pad_idx=None,
         sp1_idx=None,
         sp2_idx=None,
         proximity_horizon=None,
         proximity_constant=1.0,
         learning_rate=1e-4,
-        model="pretrained",
+        args=None,
     ):
         super().__init__()
+        self.n_vocab = n_vocab
         self.pad_idx = pad_idx
         self.sp1_idx = sp1_idx
         self.sp2_idx = sp2_idx
+        self.proximity_horizon = proximity_horizon
+        self.proximity_constant = proximity_constant
+        self.learning_rate = learning_rate
 
-        self.model = LM
-        self.proximity_model = proximity_model
+        self.lm_model = build_lm_model(args, self.n_vocab)
+        self.proximity_model = build_proximity_model(args, self.lm_model.n_embd)
 
-        self.save_hyperparameters(
-            "pad_idx",
-            "sp1_idx",
-            "sp2_idx",
-            "learning_rate",
-            "model",
-            "proximity_horizon",
-            "proximity_constant",
-        )
+        self.save_hyperparameters()
 
     def forward(self, input_ids, speaker_ids, **kwargs):
         """ labels are the the same as input_ids shift and padding fix inside model"""
-        out = self.model(input_ids, speaker_ids)
+        out = self.lm_model(input_ids, speaker_ids)
         if self.proximity_model is not None:
             out["proximity_logits"] = self.proximity_model(out["z"])
         return out
+
+    def configure_optimizers(self):
+        return AdamW(
+            self.parameters(),
+            # lr=self.hparams.learning_rate,
+            lr=self.learning_rate,
+            correct_bias=True,
+        )
+        # if self.hparams["lm_mo"] == "pretrained":
+
+        #     return AdamW(
+        #         self.parameters(),
+        #         lr=self.hparams.learning_rate,
+        #         correct_bias=True,
+        #     )
+        # else:
+        #     return torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)
 
     @torch.no_grad()
     def sample(
@@ -238,11 +317,11 @@ class TurnGPT(pl.LightningModule):
             prox_loss = proximity_loss(
                 prox_logits,
                 labels,
-                N=self.hparams.proximity_horizon,
+                N=self.proximity_horizon,
                 sp1_idx=self.sp1_idx,
                 sp2_idx=self.sp2_idx,
             )
-            loss += self.hparams.proximity_constant * prox_loss
+            loss += self.proximity_constant * prox_loss
             self.log(
                 "avg_train_prox_loss",
                 prox_loss,
@@ -301,16 +380,17 @@ class TurnGPT(pl.LightningModule):
         )
 
         loss = lm_loss
+        pros_loss = None
         if self.proximity_model is not None:
             prox_logits = self.proximity_model(output["z"])
             prox_loss = proximity_loss(
                 prox_logits,
                 labels,
-                N=self.hparams.proximity_horizon,
+                N=self.proximity_horizon,
                 sp1_idx=self.sp1_idx,
                 sp2_idx=self.sp2_idx,
             )
-            loss += self.hparams.proximity_constant * prox_loss
+            loss += self.proximity_constant * prox_loss
             self.log(
                 "avg_val_prox_loss",
                 prox_loss,
@@ -339,19 +419,10 @@ class TurnGPT(pl.LightningModule):
             prog_bar=False,
             logger=True,
         )
-        return {"val_loss": loss, "val_sp_loss": sp_loss}
+        return {"val_loss": loss, "val_sp_loss": sp_loss, "val_prox_loss": prox_loss}
 
-    def configure_optimizers(self):
-        if self.hparams["model"] == "pretrained":
-            from transformers import AdamW
-
-            return AdamW(
-                self.parameters(),
-                lr=self.hparams.learning_rate,
-                correct_bias=True,
-            )
-        else:
-            return torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)
+    def test_step(self, batch, *args, **kwargs):
+        return self.validation_step(batch, *args, **kwargs)
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -391,17 +462,20 @@ def main():
     parser = pl.Trainer.add_argparse_args(parser)
     parser = TurnGPTDM.add_data_specific_args(parser)
     parser = TurnGPT.add_model_specific_args(parser)
-    parser.add_argument(
-        "--datasets",
-        nargs="*",
-        type=str,
-        default=["coached"],
-    )
+    # handle this in dm?
+    # parser.add_argument(
+    #     "--datasets",
+    #     nargs="*",
+    #     type=str,
+    #     default=["coached"],
+    # )
+    # datasets = temp_args.datasets
+    # parser = add_builder_specific_args(parser, datasets)  # add for all builders
 
     temp_args, _ = parser.parse_known_args()
-    datasets = temp_args.datasets
-    parser = add_builder_specific_args(parser, datasets)  # add for all builders
 
+    # Add arguements for models
+    # ------------------------------------------------------------------
     # Language Model
     if temp_args.model == "pretrained":
         from turngpt.models.pretrained import TurnGPTModel
@@ -421,7 +495,6 @@ def main():
         )
 
     # Proximity Model
-
     if temp_args.proximity_model == "transformer":
         from turngpt.models.proximity import ProxTransformer
 
@@ -430,10 +503,20 @@ def main():
         from turngpt.models.proximity import ProxRNN
 
         parser = ProxRNN.add_model_specific_args(parser)
+    elif temp_args.proximity_model is None:
+        proximity_model = None
     else:
-        raise NotImplementedError()
+        raise NotImplementedError(
+            'The proximity_model argument must be one of "transformer" or "rnn"'
+        )
+
+    # ------------------------------------------------------------------
 
     args = parser.parse_args()
+    args.chunk_size = 128
+
+    # for k, v in vars(args).items():
+    #     print(f"{k}: {v}")
 
     # Where to save the training
     print()
@@ -448,84 +531,29 @@ def main():
     print("DataLoader")
     print("Batch size: ", args.batch_size)
     print("num workers: ", args.num_workers)
+    print("chunk size: ", args.chunk_size)
     dm.prepare_data()
     dm.setup("fit")
 
-    # ------------------------------------------------------------------
-    # LM
-    if args.model == "pretrained":
-        from turngpt.models.pretrained import TurnGPTModel
-
-        lm = TurnGPTModel(
-            n_vocab=len(dm.tokenizer),
-            dropout=args.dropout,
-            pretrained=args.pretrained,
-        )
-    elif args.model == "mini":
-        from turngpt.models.gpt_mini import GPT
-
-        lm = GPT(
-            n_vocab=len(dm.tokenizer),
-            n_embd=args.n_embd,
-            n_head=args.n_head,
-            n_layer=args.n_layer,
-            embd_pdrop=args.embd_pdrop,
-            resid_pdrop=args.resid_pdrop,
-            attn_pdrop=args.attn_pdrop,
-            use_speaker_emb=args.use_speaker_emb,
-            chunk_size=args.chunk_size,
-        )
-    elif args.model == "rnn":
-        from turngpt.models.gpt_rnn import RNN
-
-        lm = RNN(
-            n_vocab=len(dm.tokenizer),
-            n_embd=args.n_embd,
-            n_layer=args.n_layer,
-            dropout=args.dropout,
-            rnn=args.rnn,
-        )
-    else:
-        raise NotImplementedError
-
-    # Proximity head
-    if args.proximity_model == "transformer":
-        proximity_model = ProxTransformer(
-            input_size=lm.n_embd,
-            output_size=args.prox_output,
-            hidden_size=args.prox_hidden,
-            n_layer=args.prox_layers,
-            n_head=args.prox_heads,
-            resid_pdrop=args.prox_resid_pdrop,
-            attn_pdrop=args.prox_attn_pdrop,
-            chunk_size=args.chunk_size,
-        )
-    elif args.proximity_model == "rnn":
-        model = ProxRNN(
-            input_size=lm.n_embd,
-            hidden_size=args.prox_hidden,
-            output_size=args.prox_output,
-            num_layers=args.prox_layers,
-        )
-    else:
-        proximity_model = None
-
     model = TurnGPT(
-        LM=lm,
-        proximity_model=proximity_model,
+        # lm_model=lm,
+        # proximity_model=proximity_model,
         pad_idx=dm.tokenizer.pad_token_id,
         sp1_idx=dm.sp1_idx,
         sp2_idx=dm.sp2_idx,
         learning_rate=args.learning_rate,
-        model=args.model,
+        # model=args.model,
         proximity_horizon=args.proximity_horizon,
         proximity_constant=args.proximity_constant,
+        args=args,
     )
 
     print("\n-----", "Model", "-----")
-    print(lm.__class__.__name__)
-    if proximity_model is not None:
-        print(proximity_model.__class__.__name__)
+    print("LM:       ", model.lm_model.__class__.__name__)
+    if model.proximity_model is None:
+        print("Proximity: None")
+    else:
+        print("Proximity: ", model.proximity_model.__class__.__name__)
     print("pad_idx: ", model.pad_idx)
     print("sp1_idx: ", model.sp1_idx)
     print("sp2_idx: ", model.sp2_idx)

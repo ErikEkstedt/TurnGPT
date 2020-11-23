@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
+from ttd.basebuilder import add_builder_specific_args
 from ttd.utils import read_json
 from ttd.basebuilder import create_builders
 from ttd.tokenizer import (
@@ -168,6 +169,16 @@ class TurnGPTDM(pl.LightningDataModule):
 
         parser.add_argument("--batch_size", type=int, default=4)
         parser.add_argument("--num_workers", type=int, default=4)
+
+        parser.add_argument(
+            "--datasets",
+            nargs="*",
+            type=str,
+            default=["coached"],
+        )
+        temp_args, _ = parser.parse_known_args()
+        datasets = temp_args.datasets
+        parser = add_builder_specific_args(parser, datasets)  # add for all builders
         return parser
 
 
