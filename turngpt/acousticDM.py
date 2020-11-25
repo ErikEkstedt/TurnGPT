@@ -698,6 +698,7 @@ class AcousticGPTDM(pl.LightningDataModule):
             self.train_dset,
             shuffle=True,
             pin_memory=True,
+            drop_last=True,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
         )

@@ -104,6 +104,10 @@ def main():
         print("Logging -> ", args.save_dir)
 
         name = "TurnGPT" + args.model
+        if args.acoustic_model is not None:
+            name += "_A-" + args.acoustic_model
+        if args.proximity_model is not None:
+            name += "_P-" + args.proximity_model
         desc = f"{name} training"
         logger = TensorBoardLogger(args.save_dir, name=name)
         ch_path = join(logger.log_dir, "checkpoints")
@@ -151,4 +155,6 @@ if __name__ == "__main__":
 
     mpl_use("Agg")
     pl.seed_everything(1234)
+    # with torch.autograd.set_detect_anomaly(True):
+    #     main()
     main()

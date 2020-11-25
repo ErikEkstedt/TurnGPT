@@ -376,15 +376,6 @@ class TurnGPT(pl.LightningModule):
         out = self(input_ids, speaker_ids, waveform, spf)
         loss = self.loss_function_lm(out["logits"], labels)
 
-        self.log(
-            "avg_train_lm_loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
-
         if "proximity_logits" in out:
             prox_losses = self.proximity_model.loss_function(
                 out["proximity_logits"],
@@ -396,6 +387,14 @@ class TurnGPT(pl.LightningModule):
             self.log(
                 "avg_train_prox_loss",
                 prox_losses["loss"],
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                "avg_train_lm_loss",
+                loss,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
@@ -430,22 +429,8 @@ class TurnGPT(pl.LightningModule):
         loss = self.loss_function_lm(out["logits"], labels)
         sp_loss = self.loss_function_turn_shift(out["logits"], labels)
 
-        self.log(
-            "avg_val_lm_loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
-        self.log(
-            "avg_val_sp_loss",
-            sp_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        self.log("val_lm_loss", loss, logger=True)
+        self.log("val_sp_loss", sp_loss)
 
         if "proximity_logits" in out:
             prox_losses = self.proximity_model.loss_function(
@@ -455,29 +440,12 @@ class TurnGPT(pl.LightningModule):
                 self.sp2_idx,
                 self.pad_idx,
             )
-            self.log(
-                "avg_val_prox_loss",
-                prox_losses["loss"],
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
+            self.log("val_prox_loss", prox_losses["loss"], logger=True)
 
             # add LM loss and proximity loss
             loss += self.proximity_constant * prox_losses["loss"]
 
-        self.log(
-            "val_loss", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True
-        )
-        self.log(
-            "avg_val_loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        self.log("val_loss", loss, logger=True)
         return {"val_loss": loss}
 
     def test_step(self, batch, *args, **kwargs):

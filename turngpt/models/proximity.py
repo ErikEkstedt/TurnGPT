@@ -86,6 +86,9 @@ class ProxTransformer(pl.LightningModule):
         self.output_size = len(self.horizon)
         self.input_size = input_size
         self.loss_constants = loss_constants
+        assert len(horizon) == len(
+            loss_constants
+        ), "horizon and horizon constant must be of same length!"
 
         if input_size != hidden_size:
             self.pre_layer = nn.Linear(input_size, hidden_size)
@@ -125,7 +128,7 @@ class ProxTransformer(pl.LightningModule):
                 tmp_lab = proximity_labels.unfold(
                     dimension=1, step=1, size=tmp_horizon
                 ).sum(dim=-1)
-                tmp_lab = (tmp_lab > 0).long().detach()
+                tmp_lab = (tmp_lab > 0).long()
                 labs.append(tmp_lab.float())
             elif tmp_horizon == 1:
                 labs.append(proximity_labels.float())
@@ -152,13 +155,13 @@ class ProxTransformer(pl.LightningModule):
             if pad_idx is not None:
                 lab = label[label != pad_idx]
                 pred = logits[:, : label.shape[1], head][label != pad_idx]
-                tmp_loss = F.binary_cross_entropy_with_logits(pred, lab)
+                tmp_loss = F.binary_cross_entropy_with_logits(pred, lab.float())
             else:
                 tmp_loss = F.binary_cross_entropy_with_logits(
-                    logits[:, : label.shape[1], head], label.float()
+                    logits[:, : label.shape[1], head], label
                 )
+            loss += self.loss_constants[head] * tmp_loss
             losses[f"horizon_{horizon}"] = tmp_loss.detach().item()
-            loss += self.loss_constants[head]
         losses["loss"] = loss
         return losses
 
