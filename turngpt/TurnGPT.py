@@ -10,8 +10,10 @@ from turngpt.models import Attention1D
 from turngpt.models.pretrained import TurnGPTModel
 from turngpt.models.gpt_mini import GPT
 from turngpt.models.proximity import ProxTransformer
+from turngpt.models.gpt_rnn import RNN
 from turngpt.models.proximity import ProxRNN
 from turngpt.acoustic_model import AcousticModel
+
 
 from transformers import AdamW
 
@@ -492,11 +494,8 @@ class TurnGPT(pl.LightningModule):
 
             parser = TurnGPTModel.add_model_specific_args(parser)
         elif temp_args.model == "mini":
-            from turngpt.models.gpt_mini import GPT
-
             parser = GPT.add_model_specific_args(parser)
         elif temp_args.model == "rnn":
-            from turngpt.models.gpt_rnn import RNN
 
             parser = RNN.add_model_specific_args(parser)
         else:
@@ -506,18 +505,12 @@ class TurnGPT(pl.LightningModule):
 
         # Acoustic Model
         if temp_args.acoustic_model == "transformer":
-            from acousticgpt.acoustic_gpt import AcousticModel
-
             parser = AcousticModel.add_model_specific_args(parser)
 
         # Proximity Model
         if temp_args.proximity_model == "transformer":
-            from turngpt.models.proximity import ProxTransformer
-
             parser = ProxTransformer.add_model_specific_args(parser)
         elif temp_args.proximity_model == "rnn":
-            from turngpt.models.proximity import ProxRNN
-
             parser = ProxRNN.add_model_specific_args(parser)
         elif temp_args.proximity_model is None:
             pass
