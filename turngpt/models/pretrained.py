@@ -2,13 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import pytorch_lightning as pl
+
 from argparse import ArgumentParser
 from turngpt.pl_modules import TurnGPT
 
 from transformers import GPT2LMHeadModel, GPT2Config, AdamW
 
 
-class TurnGPTModel(nn.Module):
+class TurnGPTModel(pl.LightningModule):
     def __init__(self, n_vocab=None, dropout=0.1, pretrained="gpt2"):
         super().__init__()
 

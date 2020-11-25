@@ -17,6 +17,13 @@ from turngpt.pl_modules import TurnGPT
 logger = logging.getLogger(__name__)
 
 
+class TransformerConfig:
+    def __init__(self, block_size, **kwargs):
+        self.block_size = block_size
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
 class GPTConfig:
     """ base GPT config, params common to all GPT versions """
 

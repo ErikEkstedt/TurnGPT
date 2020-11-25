@@ -29,7 +29,7 @@ def plot_turn_shift_prediction(pr, trp, tokens, sp_ind, plot=False):
     # ax.plot(pr_roll[B], "g", label="trp", alpha=0.3)
     # ax.plot(pr_diff[B], "m", label="trp", alpha=0.3)
     ax.set_xticks(torch.arange(len(tokens)))
-    ax.set_xticklabels(tokens, rotation=65, fontdict={"fontsize": 8})
+    ax.set_xticklabels(tokens, rotation=65, fontdict={"fontsize": 10})
     ax.vlines(sp_ind, ymin=0, ymax=1, color="k", alpha=0.1, linewidth=4)
     ax.hlines(
         0.5,
@@ -44,51 +44,85 @@ def plot_turn_shift_prediction(pr, trp, tokens, sp_ind, plot=False):
     ax.legend()
     plt.tight_layout()
     if plot:
-        plt.show()
+        plt.pause(0.01)
     return fig, ax
 
 
 if __name__ == "__main__":
-
     parser = ArgumentParser()
     parser.add_argument("--checkpoint", type=str)
+    parser.add_argument("--split", type=str, default="val")
+    parser.add_argument("--plot", action="store_true")
+    parser.add_argument("--task", action="store_true")
+    # parser = TurnGPTDM.add_data_specific_args(parser, datasets=["persona"])
     parser = TurnGPTDM.add_data_specific_args(parser)
     args = parser.parse_args()
     args.chunk_size = 128
     for k, v in vars(args).items():
         print(f"{k}: {v}")
 
-    args.checkpoint = "TurnGPT/turngpt/runs/TurnGPTpretrained/version_0/checkpoints/epoch=2-val_loss=2.84545.ckpt"
+    # args.checkpoint = "TurnGPT/turngpt/runs/TurnGPTpretrained/version_0/checkpoints/epoch=2-val_loss=2.84545.ckpt"
+    # args.checkpoint = "checkpoints/proxi/checkpoints/epoch=3-val_loss=2.45156.ckpt"
     model = TurnGPT.load_from_checkpoint(args.checkpoint)
 
     dm = TurnGPTDM(args)
     dm.prepare_data()
-    dm.setup("fit")
 
     if torch.cuda.is_available():
         model.cuda()
 
-    batch = next(iter(dm.val_dataloader()))
+    if args.split == "val" or args.split == "train":
+        dm.setup("fit")
+        if args.split == "train":
+            loader = dm.train_dataloader()
+            print("split: Train")
+        else:
+            loader = dm.val_dataloader()
+            print("split: Val")
+    elif args.split == "test":
+        dm.setup("test")
+        loader = dm.test_dataloader()
+        print("\nsplit: Test")
+    else:  # all
+        dm.setup("fit")
+        dm.train_dset.filepaths += dm.val_dset.filepaths
+        dm.train_dset.filepaths += dm.test_dset.filepaths
+        loader = dm.train_dataloader()
+        print("\nsplit: All")
 
-    trainer = pl.Trainer(gpus=1)
-    out = trainer.test(model, dm.val_dataloader(), verbose=False)
+    #######################################################################
+    if args.task:
+        trainer = pl.Trainer(gpus=1)
+        out = trainer.test(model, loader, verbose=False)
+        for k, v in out[0].items():
+            print(f"{k}: {v}")
 
-    out = model(batch[0].to(model.device), batch[1].to(model.device))
+    if args.plot:
+        import matplotlib.pyplot as plt
 
-    with torch.no_grad():
-        pr = F.softmax(out["proximity_logits"], dim=-1)[..., 1]
-        trp = F.softmax(out["logits"], dim=-1)
-        trp = torch.stack((trp[..., model.sp1_idx], trp[..., model.sp2_idx]), dim=-1)
-        trp, _ = trp.max(dim=-1)
+        for batch in loader:
+            input_ids, speaker_ids = batch[0], batch[1]
+            out = model(input_ids.to(model.device), speaker_ids.to(model.device))
+            with torch.no_grad():
+                pr = F.softmax(out["proximity_logits"], dim=-1)[..., 1]
+                trp = F.softmax(out["logits"], dim=-1)
+                trp = torch.stack(
+                    (trp[..., model.sp1_idx], trp[..., model.sp2_idx]), dim=-1
+                )
+                trp, _ = trp.max(dim=-1)
 
-    import matplotlib.pyplot as plt
+            for B in range(batch[0].shape[0]):
+                inp_ids = input_ids[B]
+                _, sp_ind = get_speaker_shift_indices(
+                    inp_ids.unsqueeze(0), model.sp1_idx, model.sp2_idx
+                )
+                toks = convert_ids_to_tokens(inp_ids, dm.tokenizer)
+                fig, ax = plot_turn_shift_prediction(
+                    pr[B], trp[B], toks, sp_ind, plot=True
+                )
+                try:
+                    ans = input("Ctrl-C to break")
+                except KeyboardInterrupt:
+                    import sys
 
-    B = 1
-    input_ids = batch[0]
-
-    inp_ids = input_ids[B]
-    _, sp_ind = get_speaker_shift_indices(
-        inp_ids.unsqueeze(0), model.sp1_idx, model.sp2_idx
-    )
-    toks = convert_ids_to_tokens(inp_ids, dm.tokenizer)
-    plot_turn_shift_prediction(pr[B], trp[B], toks, sp_ind, plot=True)
+                    sys.exit(0)

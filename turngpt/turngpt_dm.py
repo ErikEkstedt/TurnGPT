@@ -154,7 +154,7 @@ class TurnGPTDM(pl.LightningDataModule):
         )
 
     @staticmethod
-    def add_data_specific_args(parent_parser):
+    def add_data_specific_args(parent_parser, datasets=None):
         """ Specify the hyperparams for this LightningModule """
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
         parser.add_argument("--tokenizer_pretrained", type=str, default="gpt2")
@@ -170,15 +170,25 @@ class TurnGPTDM(pl.LightningDataModule):
         parser.add_argument("--batch_size", type=int, default=4)
         parser.add_argument("--num_workers", type=int, default=4)
 
-        parser.add_argument(
-            "--datasets",
-            nargs="*",
-            type=str,
-            default=["coached"],
-        )
+        if datasets is None:
+            parser.add_argument(
+                "--datasets",
+                nargs="*",
+                type=str,
+                default=["coached"],
+            )
+        else:
+            parser.add_argument(
+                "--datasets",
+                nargs="*",
+                type=str,
+                default=datasets,
+            )
+
         temp_args, _ = parser.parse_known_args()
-        datasets = temp_args.datasets
-        parser = add_builder_specific_args(parser, datasets)  # add for all builders
+        parser = add_builder_specific_args(
+            parser, temp_args.datasets
+        )  # add for all builders
         return parser
 
 
