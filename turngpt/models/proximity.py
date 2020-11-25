@@ -77,6 +77,7 @@ class ProxTransformer(pl.LightningModule):
         resid_pdrop=0.1,
         attn_pdrop=0.1,
         chunk_size=128,
+        loss_constants=[1, 1],
     ):
         super().__init__()
         if isinstance(horizon, int):
@@ -84,6 +85,7 @@ class ProxTransformer(pl.LightningModule):
         self.horizon = horizon
         self.output_size = len(self.horizon)
         self.input_size = input_size
+        self.loss_constants = loss_constants
 
         if input_size != hidden_size:
             self.pre_layer = nn.Linear(input_size, hidden_size)
@@ -144,31 +146,21 @@ class ProxTransformer(pl.LightningModule):
         :sp2_idx:       int, speaker 2 token index
         """
         labs = self.create_label(labels, sp1_idx, sp2_idx)
-        losses = []
-        for head, label in enumerate(labs):
+        losses = {}
+        loss = 0
+        for head, (horizon, label) in enumerate(zip(self.horizon, labs)):
             if pad_idx is not None:
                 lab = label[label != pad_idx]
                 pred = logits[:, : label.shape[1], head][label != pad_idx]
-                losses.append(F.binary_cross_entropy_with_logits(pred, lab))
+                tmp_loss = F.binary_cross_entropy_with_logits(pred, lab)
             else:
-                losses.append(
-                    F.binary_cross_entropy_with_logits(
-                        logits[:, : label.shape[1], head], label.float()
-                    )
+                tmp_loss = F.binary_cross_entropy_with_logits(
+                    logits[:, : label.shape[1], head], label.float()
                 )
+            losses[f"horizon_{horizon}"] = tmp_loss.detach().item()
+            loss += self.loss_constants[head]
+        losses["loss"] = loss
         return losses
-
-    #         loss_fn = nn.BCEWithLogitsLoss()
-    #         labs = self.create_label(labels, sp1_idx, sp2_idx)
-    #         losses = []
-    #         for head, label in enumerate(labs):
-    #             if pad_idx is not None:
-    #                 lab = label[label != pad_idx]
-    #                 pred = logits[:, : label.shape[1], head][label != pad_idx]
-    #                 losses.append(loss_fn(pred, lab))
-    #             else:
-    #                 losses.append(loss_fn(logits[:, : label.shape[1], head], label.float()))
-    #         return losses
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -189,7 +181,13 @@ class ProxTransformer(pl.LightningModule):
             "--prox_horizon",
             nargs="*",
             type=int,
-            default=[1, 3],
+            default=[1],
+        )
+        parser.add_argument(
+            "--prox_horizon_constants",
+            nargs="*",
+            type=int,
+            default=[1],
         )
         return parser
 

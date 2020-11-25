@@ -163,7 +163,7 @@ class TurnGPTDM(pl.LightningDataModule):
         )
         parser.add_argument("--explicit_turns", type=bool, default=True)
         parser.add_argument("--EOT_token_id", type=int, default=None)
-        parser.add_argument("--chunk_size", type=int, default=-1)
+        parser.add_argument("--chunk_size", type=int, default=128)
         parser.add_argument("--chunk_overlap", type=int, default=10)
         parser.add_argument("--chunk_keep_length", type=int, default=20)
 

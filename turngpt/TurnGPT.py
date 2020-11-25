@@ -6,12 +6,12 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 
 # from turngpt.proximity_loss import proximity_loss
+from turngpt.models import Attention1D
 from turngpt.models.pretrained import TurnGPTModel
 from turngpt.models.gpt_mini import GPT
 from turngpt.models.proximity import ProxTransformer
 from turngpt.models.proximity import ProxRNN
-
-# from acousticgpt.acoustic_gpt import AcousticGPT
+from turngpt.acoustic_model import AcousticModel
 
 from transformers import AdamW
 
@@ -76,10 +76,8 @@ def build_proximity_model(args, lm_model_n_embd):
     return proximity_model
 
 
-def build_acoustic_model(args, lm_n_embd):
+def build_acoustic_model(args):
     if args.acoustic_model == "transformer":
-        from acousticgpt.acoustic_gpt import AcousticModel
-
         return AcousticModel(
             frames=args.acoustic_frames,
             n_feats=args.acoustic_n_feats,
@@ -97,14 +95,11 @@ def build_acoustic_model(args, lm_n_embd):
 
 
 def build_modal_mixer(input_size=768, n_modes=2, n_heads=8):
-    from acousticgpt.acoustic_gpt import Attention1D
-
     return Attention1D(
         D=input_size, features=n_modes, features_out=1, num_heads=n_heads
     )
 
 
-# TODO: better processs_bar logging not really that important
 class TurnGPT(pl.LightningModule):
     def __init__(
         self,
@@ -130,39 +125,60 @@ class TurnGPT(pl.LightningModule):
         self.proximity_model = build_proximity_model(args, self.lm_model.n_embd)
 
         if args.acoustic_model is not None:
-            self.acoustic_model = build_acoustic_model(args, self.lm_model.n_embd)
+            self.acoustic_model = build_acoustic_model(args)
+
+            # make sure that the modal mixer gets same input dimension from text and audio
+            self.acoustic_projection = None
             if self.acoustic_model.hidden != self.lm_model.n_embd:
-                self.upsample = torch.nn.Linear(
+                self.acoustic_projection = torch.nn.Linear(
                     self.acoustic_model.hidden, self.lm_model.n_embd
                 )
+
             self.modal_mixer = build_modal_mixer(
                 input_size=self.lm_model.n_embd, n_modes=2, n_heads=8
             )
 
         self.save_hyperparameters()
 
-    def freeze_lm_model(self):
-        self.lm_model.freeze()
-        print("LM Frozen")
-
-    def freeze_proximity_model(self):
-        self.proximity_model.freeze()
-        print("Proximity Frozen")
-
-    def freeze_acoustic_model(self):
-        self.acoustic_model.freeze()
-        print("Acoustic Frozen")
-
-    def freeze_modal_mixer(self):
-        for p in self.modal_mizer.parameters():
-            p.requires_grad = False
-        print("Modal Mixer Frozen")
-
-    def forward(self, input_ids, speaker_ids, **kwargs):
+    def forward(
+        self,
+        input_ids,
+        speaker_ids,
+        waveform=None,
+        spf=None,
+        output_attentions=False,
+        **kwargs,
+    ):
         """ labels are the the same as input_ids shift and padding fix inside model"""
+
+        # LM
         out = self.lm_model(input_ids, speaker_ids)
+
+        # Acoustic
+        if spf is not None and self.acoustic_model is not None:
+            za, attn_feat = self.acoustic_model(spf)
+
+            if self.acoustic_model.hidden != self.lm_model.n_embd:
+                za = self.acoustic_projection(za)
+
+            out["za"] = za
+            if output_attentions:
+                out["attn_feat"] = attn_feat
+
+            z_mix = torch.stack((out["z"], za), dim=-2)
+            z_mix, attn_mix = self.modal_mixer(z_mix)
+            z_mix = z_mix.squeeze(-2)
+            attn_mix = attn_mix.squeeze(-2)
+            out["zm"] = z_mix
+            if output_attentions:
+                out["attn_mix"] = attn_mix
+        else:
+            z_mix = out["z"]
+
+        # Proximity
         if self.proximity_model is not None:
-            out["proximity_logits"] = self.proximity_model(out["z"])
+            out["proximity_logits"] = self.proximity_model(z_mix)
+
         return out
 
     def configure_optimizers(self):
@@ -299,13 +315,6 @@ class TurnGPT(pl.LightningModule):
             "k": [k + 1] * all_input_ids.shape[0],
         }
 
-    def loss_function(self, logits, labels):
-        if self.pad_idx is not None:
-            labels[labels == self.pad_idx] = -100  # don't train on these
-        return torch.nn.CrossEntropyLoss()(
-            logits.view(-1, logits.size(-1)), labels.view(-1)
-        )
-
     @torch.no_grad()
     def loss_function_turn_shift(self, logits, labels):
         sp_prob = F.softmax(logits, dim=-1)
@@ -328,67 +337,71 @@ class TurnGPT(pl.LightningModule):
         loss = torch.nn.BCEWithLogitsLoss()(sp_prob, sp_labels)
         return loss
 
-    def training_step(self, batch, *args, **kwargs):
+    def loss_function_lm(self, logits, labels):
+        if self.pad_idx is not None:
+            labels[labels == self.pad_idx] = -100  # don't train on these
+        return torch.nn.CrossEntropyLoss()(
+            logits.view(-1, logits.size(-1)), labels.view(-1)
+        )
+
+    def shared_step(self, batch):
+        """
+        Simply shifts the input to acquire the labels.
+        Sets waveform/spf:speech-features to None if they don't exist
+        """
         input_ids, speaker_ids = batch[0], batch[1]
 
-        # Forward pass
+        # shift for labels
         labels = input_ids[:, 1:].contiguous()
         input_ids = input_ids[:, :-1].contiguous()
         speaker_ids = speaker_ids[:, :-1].contiguous()
 
-        audio, prosody = None, None
+        waveform, spf = None, None
         if len(batch) > 2:
-            audio = batch[2][:, 1:].contiguous()
+            waveform = batch[2][:, 1:].contiguous()
 
         if len(batch) > 3 and len(batch[3]) > 0:
-            prosody = batch[3][:, 1:].contiguous()
+            spf = batch[3][:, 1:].contiguous()
         else:
-            prosody = None
+            spf = None
+
+        return input_ids, speaker_ids, labels, waveform, spf
+
+    def training_step(self, batch, *args, **kwargs):
+        input_ids, speaker_ids, labels, waveform, spf = self.shared_step(batch)
 
         # LM
-        output = self(input_ids, speaker_ids)
-        loss = self.loss_function(output["logits"], labels)
+        out = self(input_ids, speaker_ids, waveform, spf)
+        loss = self.loss_function_lm(out["logits"], labels)
 
-        # Audio
-        if prosody is not None and self.acoustic_model is not None:
-            za = self.acoustic_model(prosody)
-            if self.acoustic_model.hidden != self.lm_model.n_embd:
-                za = self.upsample(za)
-            z_mix = torch.stack((output["z"], za), dim=-2)
-            z_mix, attn_mix = self.modal_mixer(z_mix)
-            z_mix = z_mix.squeeze(-2)
-            attn_mix = attn_mix.squeeze(-2)
-        else:
-            z_mix = output["z"]
+        self.log(
+            "avg_train_lm_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
 
-        if self.proximity_model is not None:
-            prox_logits = self.proximity_model(z_mix)
+        if "proximity_logits" in out:
             prox_losses = self.proximity_model.loss_function(
-                prox_logits, labels, self.sp1_idx, self.sp2_idx, self.pad_idx
+                out["proximity_logits"],
+                labels,
+                self.sp1_idx,
+                self.sp2_idx,
+                self.pad_idx,
             )
-            prox_loss = 0
-            for l in prox_losses:
-                prox_loss += l
-
             self.log(
                 "avg_train_prox_loss",
-                prox_loss,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
-            self.log(
-                "avg_train_lm_loss",
-                loss,
+                prox_losses["loss"],
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
             )
 
-            # multiply by constant
-            loss += self.proximity_constant * prox_loss
+            # add LM loss and proximity loss
+            loss += self.proximity_constant * prox_losses["loss"]
 
         self.log(
             "train_loss", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True
@@ -408,66 +421,49 @@ class TurnGPT(pl.LightningModule):
         return {"loss": batch_parts["loss"].mean()}
 
     def validation_step(self, batch, *args, **kwargs):
-        input_ids, speaker_ids = batch[0], batch[1]
-
-        # Forward pass
-        labels = input_ids[:, 1:].contiguous()
-        input_ids = input_ids[:, :-1].contiguous()
-        speaker_ids = speaker_ids[:, :-1].contiguous()
-
-        audio, prosody = None, None
-        if len(batch) > 2:
-            audio = batch[2][:, 1:].contiguous()
-
-        if len(batch) > 3 and len(batch[3]) > 0:
-            prosody = batch[3][:, 1:].contiguous()
-        else:
-            prosody = None
+        input_ids, speaker_ids, labels, waveform, spf = self.shared_step(batch)
 
         # LM
-        output = self(input_ids, speaker_ids)
-        loss = self.loss_function(output["logits"], labels)
+        out = self(input_ids, speaker_ids, waveform, spf)
+        loss = self.loss_function_lm(out["logits"], labels)
+        sp_loss = self.loss_function_turn_shift(out["logits"], labels)
 
-        # Audio
-        if prosody is not None and self.acoustic_model is not None:
-            za = self.acoustic_model(prosody)
-            if self.acoustic_model.hidden != self.lm_model.n_embd:
-                za = self.upsample(za)
-            z_mix = torch.stack((output["z"], za), dim=-2)
-            z_mix, attn_mix = self.modal_mixer(z_mix)
-            z_mix = z_mix.squeeze(-2)
-            attn_mix = attn_mix.squeeze(-2)
-        else:
-            z_mix = output["z"]
+        self.log(
+            "avg_val_lm_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            "avg_val_sp_loss",
+            sp_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
 
-        if self.proximity_model is not None:
-            prox_logits = self.proximity_model(z_mix)
+        if "proximity_logits" in out:
             prox_losses = self.proximity_model.loss_function(
-                prox_logits, labels, self.sp1_idx, self.sp2_idx, self.pad_idx
+                out["proximity_logits"],
+                labels,
+                self.sp1_idx,
+                self.sp2_idx,
+                self.pad_idx,
             )
-            prox_loss = 0
-            for l in prox_losses:
-                prox_loss += l
-
             self.log(
                 "avg_val_prox_loss",
-                prox_loss,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
-            self.log(
-                "avg_val_lm_loss",
-                loss,
+                prox_losses["loss"],
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
             )
 
-            # multiply by constant
-            loss += self.proximity_constant * prox_loss
+            # add LM loss and proximity loss
+            loss += self.proximity_constant * prox_losses["loss"]
 
         self.log(
             "val_loss", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True
@@ -564,57 +560,37 @@ class TurnGPT(pl.LightningModule):
 
 
 if __name__ == "__main__":
-
-    # parser = ArgumentParser()
-    # parser = TurnGPT.add_model_specific_args(parser)
-    # args = parser.parse_args()
-
-    # for k, v in vars(args).items():
-    #     print(f"{k}: {v}")
-
-    # model = TurnGPT(
-    #     n_vocab=50259,
-    #     pad_idx=50256,
-    #     sp1_idx=50257,
-    #     sp2_idx=50258,
-    #     learning_rate=args.learning_rate,
-    #     proximity_constant=args.proximity_constant,
-    #     args=args,
-    # )
-
-    # print(model)
-
     from os.path import join
     from os import environ
-    from pytorch_lightning.loggers import TensorBoardLogger
-    from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-    from acousticgpt.acousticDM import AcousticGPTDM
+    from turngpt.acousticDM import AcousticGPTDM
     from ttd.utils import get_run_dir
 
     parser = ArgumentParser()
-    parser = pl.Trainer.add_argparse_args(parser)
-    parser = AcousticGPTDM.add_data_specific_args(parser, datasets=["maptask"])
     parser = TurnGPT.add_model_specific_args(
         parser, proximity_model="transformer", acoustic_model="transformer"
     )
-    args = parser.parse_args()
-    for k, v in vars(args).items():
+    tmp_args, _ = parser.parse_known_args()
+    print("\nModel Settings")
+    print("--------------")
+    for k, v in vars(tmp_args).items():
         print(f"{k}: {v}")
+    parser = AcousticGPTDM.add_data_specific_args(parser, datasets=["maptask"])
+    parser = pl.Trainer.add_argparse_args(parser)
+    args = parser.parse_args()
     args.prosody = True
-
     args.acoustic_hidden = 128
 
     dm = AcousticGPTDM(args)
     dm.prepare_data()
     dm.setup("fit")
 
-    # loader = dm.val_dataloader()
-    # batch = next(iter(loader))
-    # input_ids, speaker_ids, xa, xp = batch
-    # print("input_ids: ", tuple(input_ids.shape))
-    # print("speaker_ids: ", tuple(speaker_ids.shape))
-    # print("xa: ", tuple(xa.shape))
-    # print("xp: ", tuple(xp.shape))
+    loader = dm.val_dataloader()
+    batch = next(iter(loader))
+    input_ids, speaker_ids, xa, xp = batch
+    print("input_ids: ", tuple(input_ids.shape))
+    print("speaker_ids: ", tuple(speaker_ids.shape))
+    print("xa: ", tuple(xa.shape))
+    print("xp: ", tuple(xp.shape))
 
     model = TurnGPT(
         n_vocab=50259,
@@ -625,9 +601,15 @@ if __name__ == "__main__":
         proximity_constant=args.proximity_constant,
         args=args,
     )
-    # print(model)
-    # model.cuda()
-    # out = model.training_step(batch)
+
+    # TODO: Pretraining step + Finetuning
+    print("LM: ", model.lm_model.__class__.__name__)
+    if model.acoustic_model is not None:
+        print("Acoustic: ", model.acoustic_model.__class__.__name__)
+    if model.acoustic_projection is not None:
+        print("Acu-proj: ", model.acoustic_projection.__class__.__name__)
+    if model.proximity_model is not None:
+        print("Proximity: ", model.proximity_model.__class__.__name__)
 
     # Where to save the training
     print()
@@ -636,51 +618,6 @@ if __name__ == "__main__":
     print(args.save_dir)
     print()
 
-    checkpoint_callback = None
-    callbacks = None
-    local_rank = environ.get("LOCAL_RANK", 0)
-    if local_rank == 0:
-        print("LOCAL_RANK: ", local_rank)
-        print("Logging -> ", args.save_dir)
-
-        name = "TurnGPT" + args.model
-        desc = f"{name} training"
-        logger = TensorBoardLogger(args.save_dir, name=name)
-        ch_path = join(logger.log_dir, "checkpoints")
-        checkpoint_callback = ModelCheckpoint(
-            dirpath=ch_path,
-            filename="{epoch}-{val_loss:.5f}",
-            save_top_k=2,
-            mode="min",
-            monitor="val_loss",
-        )
-
-        # Save the used tokenizer
-        tokenizer_path = join(logger.experiment.log_dir, "tokenizer.pt")
-        torch.save(dm.tokenizer, tokenizer_path)
-        print("tokenizer saved -> ", tokenizer_path)
-
-        if args.early_stopping:
-            print(f"Early stopping (patience={args.patience})")
-            early_stop_callback = EarlyStopping(
-                monitor="val_loss",
-                patience=args.patience,
-                strict=True,  # crash if "monitor" is not found in val metrics
-                verbose=True,
-            )
-            callbacks = [early_stop_callback]
-        print("-" * 50)
-
     # Trainer
-    trainer = pl.Trainer.from_argparse_args(
-        args,
-        logger=logger,
-        checkpoint_callback=checkpoint_callback,
-        callbacks=callbacks,
-    )
-
+    trainer = pl.Trainer.from_argparse_args(args)
     trainer.fit(model, datamodule=dm)
-
-    # out = model.validation_step([b.to(model.device) for b in batch])
-
-    # print("z: ", tuple(z.shape))

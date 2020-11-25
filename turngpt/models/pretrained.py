@@ -1,13 +1,15 @@
+from argparse import ArgumentParser
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import pytorch_lightning as pl
-
-from argparse import ArgumentParser
-from turngpt.pl_modules import TurnGPT
-
 from transformers import GPT2LMHeadModel, GPT2Config, AdamW
+
+"""
+Wrapper around Huggingface GPT2 model
+"""
 
 
 class TurnGPTModel(pl.LightningModule):

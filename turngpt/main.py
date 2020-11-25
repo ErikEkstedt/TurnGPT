@@ -12,27 +12,51 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from ttd.basebuilder import add_builder_specific_args
 from ttd.utils import get_run_dir
 
-from turngpt.turngpt_dm import TurnGPTDM
 from turngpt.TurnGPT import TurnGPT
+from turngpt.turngpt_dm import TurnGPTDM
+from turngpt.acousticDM import AcousticGPTDM
 
 
 def main():
     parser = ArgumentParser()
-    parser = pl.Trainer.add_argparse_args(parser)
-    parser = TurnGPTDM.add_data_specific_args(parser)
+    parser.add_argument("--audio", action="store_true")
+    parser.add_argument("--checkpoint", type=str, default=None)
     parser = TurnGPT.add_model_specific_args(parser)
+    temp_args, _ = parser.parse_known_args()
+    print("\nModel Settings")
+    print("--------------")
+    for k, v in vars(temp_args).items():
+        print(f"{k}: {v}")
+    print("-" * 70)
 
-    # ------------------------------------------------------------------
+    # Add data args
+    if temp_args.audio:
+
+        parser = AcousticGPTDM.add_data_specific_args(parser, datasets=["maptask"])
+    else:
+        parser = TurnGPTDM.add_data_specific_args(parser)
+
+    # Add trainer args
+    parser = pl.Trainer.add_argparse_args(parser)
+
     args = parser.parse_args()
-    args.chunk_size = 128
 
     # ------------------------------------------------------------------
     # Data
-    dm = TurnGPTDM(args)
-    print("DataLoader")
-    print("Batch size: ", args.batch_size)
+    print("\nDataLoader")
+    if args.audio:
+        dm = AcousticGPTDM(args)
+        print("sample rate: ", args.sample_rate)
+        print("hop time: ", args.hop_time)
+        print("window time: ", args.window_time)
+        print("segment time: ", args.word_audio_segment_time)
+        print("prosody: ", args.prosody)
+    else:
+        dm = TurnGPTDM(args)
+    print("batch size: ", args.batch_size)
     print("num workers: ", args.num_workers)
     print("chunk size: ", args.chunk_size)
+    print("explicit_turns: ", args.explicit_turns)
     dm.prepare_data()
     dm.setup("fit")
 
@@ -46,28 +70,32 @@ def main():
         args=args,
     )
 
+    # Load checkpoint weights
+    # strict=False because we might have more parameters in this run...
+    if args.checkpoint is not None:
+        model.load_from_checkpoint(args.checkpoint, strict=False)
+
     print("\n-----", "Model", "-----")
     print("LM:       ", model.lm_model.__class__.__name__)
+    if model.acoustic_model is not None:
+        print("Acoustic: ", model.acoustic_model.__class__.__name__)
+    if model.acoustic_projection is not None:
+        print("Acous-proj: ", model.acoustic_projection.__class__.__name__)
     if model.proximity_model is None:
         print("Proximity: None")
-    else:
-        print("Proximity: ", model.proximity_model.__class__.__name__)
+    print("n_vocab: ", len(dm.tokenizer))
     print("pad_idx: ", model.pad_idx)
     print("sp1_idx: ", model.sp1_idx)
     print("sp2_idx: ", model.sp2_idx)
-    print("n_vocab: ", len(dm.tokenizer))
     print()
 
     # ------------------------------------------------------------------
     # Checkpoint callback (early stopping)
 
     # Where to save the training
-    print()
     print("-" * 70)
     args.save_dir = get_run_dir(__file__)
-    print(args.save_dir)
-    print()
-
+    print("root dir: ", args.save_dir)
     checkpoint_callback = None
     callbacks = None
     local_rank = environ.get("LOCAL_RANK", 0)
@@ -122,6 +150,5 @@ if __name__ == "__main__":
     from matplotlib import use as mpl_use
 
     mpl_use("Agg")
-
     pl.seed_everything(1234)
     main()

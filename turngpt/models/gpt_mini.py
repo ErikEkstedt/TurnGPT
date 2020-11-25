@@ -12,8 +12,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from turngpt.pl_modules import TurnGPT
-
 logger = logging.getLogger(__name__)
 
 
