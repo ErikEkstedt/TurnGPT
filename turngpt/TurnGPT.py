@@ -671,7 +671,13 @@ if __name__ == "__main__":
             callbacks = [early_stop_callback]
         print("-" * 50)
 
-    trainer = pl.Trainer.from_argparse_args(args)
+    # Trainer
+    trainer = pl.Trainer.from_argparse_args(
+        args,
+        logger=logger,
+        checkpoint_callback=checkpoint_callback,
+        callbacks=callbacks,
+    )
 
     trainer.fit(model, datamodule=dm)
 
