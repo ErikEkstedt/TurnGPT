@@ -124,11 +124,13 @@ class TurnGPT(pl.LightningModule):
         self.lm_model = build_lm_model(args, self.n_vocab)
         self.proximity_model = build_proximity_model(args, self.lm_model.n_embd)
 
+        self.acoustic_model = None
+        self.acoustic_projection = None
+        self.modal_mixer = None
         if args.acoustic_model is not None:
             self.acoustic_model = build_acoustic_model(args)
 
             # make sure that the modal mixer gets same input dimension from text and audio
-            self.acoustic_projection = None
             if self.acoustic_model.hidden != self.lm_model.n_embd:
                 self.acoustic_projection = torch.nn.Linear(
                     self.acoustic_model.hidden, self.lm_model.n_embd
