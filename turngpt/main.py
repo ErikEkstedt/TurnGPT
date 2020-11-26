@@ -70,11 +70,6 @@ def main():
         args=args,
     )
 
-    # Load checkpoint weights
-    # strict=False because we might have more parameters in this run...
-    if args.checkpoint is not None:
-        model.load_from_checkpoint(args.checkpoint, strict=False)
-
     print("\n-----", "Model", "-----")
     print("LM:       ", model.lm_model.__class__.__name__)
     if model.acoustic_model is not None:
@@ -87,6 +82,12 @@ def main():
     print("pad_idx: ", model.pad_idx)
     print("sp1_idx: ", model.sp1_idx)
     print("sp2_idx: ", model.sp2_idx)
+
+    # Load checkpoint weights
+    # strict=False because we might have more parameters in this run...
+    if args.checkpoint is not None:
+        model.load_from_checkpoint(args.checkpoint, strict=False)
+        print("Loaded Checkpoint: ", args.checkpoint)
     print()
 
     # ------------------------------------------------------------------

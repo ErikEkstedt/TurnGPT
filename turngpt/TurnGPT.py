@@ -12,10 +12,59 @@ from turngpt.models.gpt_mini import GPT
 from turngpt.models.proximity import ProxTransformer
 from turngpt.models.gpt_rnn import RNN
 from turngpt.models.proximity import ProxRNN
-from turngpt.acoustic_model import AcousticModel
+from turngpt.acoustic_model import AcousticTransformer, AcousticConv
 
 
 from transformers import AdamW
+
+
+def add_lm_model_args(parser):
+    temp_args, _ = parser.parse_known_args()
+    if temp_args.model == "pretrained":
+        from turngpt.models.pretrained import TurnGPTModel
+
+        parser = TurnGPTModel.add_model_specific_args(parser)
+    elif temp_args.model == "mini":
+        parser = GPT.add_model_specific_args(parser)
+    elif temp_args.model == "rnn":
+
+        parser = RNN.add_model_specific_args(parser)
+    else:
+        raise NotImplementedError(
+            'The model argument must be one of "mini", "sparse" or "pretrained"'
+        )
+    return parser
+
+
+def add_acoustic_model_args(parser):
+    temp_args, _ = parser.parse_known_args()
+    if temp_args.acoustic_model == "transformer":
+        parser = AcousticTransformer.add_model_specific_args(parser)
+    elif temp_args.acoustic_model == "conv":
+        parser = AcousticConv.add_model_specific_args(parser)
+    elif temp_args.proximity_model is None:
+        pass
+    else:
+        raise NotImplementedError(
+            'The acoustic_model argument must be one of "transformer" or "conv"'
+        )
+    return parser
+
+
+def add_proximity_model_args(parser):
+    temp_args, _ = parser.parse_known_args()
+    # Proximity Model
+    if temp_args.proximity_model == "transformer":
+        parser = ProxTransformer.add_model_specific_args(parser)
+    elif temp_args.proximity_model == "rnn":
+        parser = ProxRNN.add_model_specific_args(parser)
+    elif temp_args.proximity_model is None:
+        pass
+    else:
+        raise NotImplementedError(
+            'The proximity_model argument must be one of "transformer" or "rnn"'
+        )
+    return parser
 
 
 def build_lm_model(args, n_vocab):
@@ -80,7 +129,7 @@ def build_proximity_model(args, lm_model_n_embd):
 
 def build_acoustic_model(args):
     if args.acoustic_model == "transformer":
-        return AcousticModel(
+        return AcousticTransformer(
             frames=args.acoustic_frames,
             n_feats=args.acoustic_n_feats,
             enc_hidden=args.acoustic_enc_hidden,
@@ -91,6 +140,14 @@ def build_acoustic_model(args):
             resid_pdrop=args.acoustic_resid_pdrop,
             attn_pdrop=args.acoustic_attn_pdrop,
             chunk_size=args.acoustic_chunk_size,
+        )
+    elif args.acoustic_model == "conv":
+        return AcousticConv(
+            frames=args.acoustic_frames,
+            n_feats=args.acoustic_n_feats,
+            enc_hidden=args.acoustic_enc_hidden,
+            enc_layers=args.acoustic_enc_layers,
+            hidden=args.acoustic_hidden,
         )
     else:
         return None
@@ -125,19 +182,16 @@ class TurnGPT(pl.LightningModule):
 
         self.lm_model = build_lm_model(args, self.n_vocab)
         self.proximity_model = build_proximity_model(args, self.lm_model.n_embd)
+        self.acoustic_model = build_acoustic_model(args)
 
-        self.acoustic_model = None
         self.acoustic_projection = None
         self.modal_mixer = None
-        if args.acoustic_model is not None:
-            self.acoustic_model = build_acoustic_model(args)
-
+        if self.acoustic_model is not None:
             # make sure that the modal mixer gets same input dimension from text and audio
             if self.acoustic_model.hidden != self.lm_model.n_embd:
                 self.acoustic_projection = torch.nn.Linear(
                     self.acoustic_model.hidden, self.lm_model.n_embd
                 )
-
             self.modal_mixer = build_modal_mixer(
                 input_size=self.lm_model.n_embd, n_modes=2, n_heads=8
             )
@@ -395,6 +449,14 @@ class TurnGPT(pl.LightningModule):
                 logger=True,
             )
             self.log(
+                "train_prox_loss",
+                prox_losses["loss"],
+                on_step=True,
+                on_epoch=False,
+                prog_bar=True,
+                logger=True,
+            )
+            self.log(
                 "avg_train_lm_loss",
                 loss,
                 on_step=False,
@@ -407,7 +469,12 @@ class TurnGPT(pl.LightningModule):
             loss += self.proximity_constant * prox_losses["loss"]
 
         self.log(
-            "train_loss", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True
+            "train_loss",
+            loss,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            logger=True,
         )
         self.log(
             "avg_train_loss",
@@ -483,42 +550,17 @@ class TurnGPT(pl.LightningModule):
         # Training
         parser.add_argument("--dropout", type=float, default=0.1)
         parser.add_argument("--learning_rate", default=1e-4, type=float)
-        parser.add_argument("--early_stopping", default=False, type=bool)
+        parser.add_argument("--early_stopping", action="store_true")
         parser.add_argument("--patience", default=10, type=int)
 
-        temp_args, _ = parser.parse_known_args()
-
         # Language Model
-        if temp_args.model == "pretrained":
-            from turngpt.models.pretrained import TurnGPTModel
-
-            parser = TurnGPTModel.add_model_specific_args(parser)
-        elif temp_args.model == "mini":
-            parser = GPT.add_model_specific_args(parser)
-        elif temp_args.model == "rnn":
-
-            parser = RNN.add_model_specific_args(parser)
-        else:
-            raise NotImplementedError(
-                'The model argument must be one of "mini", "sparse" or "pretrained"'
-            )
+        parser = add_lm_model_args(parser)
 
         # Acoustic Model
-        if temp_args.acoustic_model == "transformer":
-            parser = AcousticModel.add_model_specific_args(parser)
+        parser = add_acoustic_model_args(parser)
 
         # Proximity Model
-        if temp_args.proximity_model == "transformer":
-            parser = ProxTransformer.add_model_specific_args(parser)
-        elif temp_args.proximity_model == "rnn":
-            parser = ProxRNN.add_model_specific_args(parser)
-        elif temp_args.proximity_model is None:
-            pass
-        else:
-            raise NotImplementedError(
-                'The proximity_model argument must be one of "transformer" or "rnn"'
-            )
-
+        parser = add_proximity_model_args(parser)
         return parser
 
 
@@ -565,7 +607,6 @@ if __name__ == "__main__":
         args=args,
     )
 
-    # TODO: Pretraining step + Finetuning
     print("LM: ", model.lm_model.__class__.__name__)
     if model.acoustic_model is not None:
         print("Acoustic: ", model.acoustic_model.__class__.__name__)

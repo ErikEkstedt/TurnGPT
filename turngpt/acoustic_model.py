@@ -122,14 +122,60 @@ class SPFConv(nn.Module):
             z.chunk(n_feats, dim=1), dim=1
         )  # M, hidden, T -> M, n_feats, hh, T
         z = z.flatten(-2)  # M, n_feats, hh, T -> M, n_feats, hh*T
-        z = self.head(z)  # M, n_feats, hh*T -> M, n_feats, hidden
+        z = self.ln(self.head(z))  # M, n_feats, hh*T -> M, n_feats, hidden
         z = z.view(
             B, N, n_feats, self.output_size
         )  # M, n_feats, hidden -> B, N, n_feats, hidden
         return z  # ready to be attended by transformer
 
 
-class AcousticModel(pl.LightningModule):
+class AcousticConv(pl.LightningModule):
+    def __init__(
+        self,
+        frames=20,
+        n_feats=4,
+        enc_hidden=32,
+        enc_layers=3,
+        hidden=768,
+        n_head=8,
+    ):
+        super().__init__()
+        self.hidden = hidden
+        self.n_head = n_head
+        self.feature_encoder = SPFConv(
+            frames,
+            n_feats=n_feats,
+            hidden=enc_hidden,
+            output_size=hidden,
+            num_layers=enc_layers,
+        )
+        self.channel_transformer = Attention1D(
+            D=hidden, features=n_feats, features_out=1, num_heads=n_head
+        )
+        self.ln_f = nn.LayerNorm(hidden)
+
+    def forward(self, x):
+        x = self.feature_encoder(x)
+        x, feat_attn = self.channel_transformer(x)
+        feat_attn = feat_attn.squeeze(-2)
+        x = x.squeeze(-2)
+        x = self.ln_f(x)
+        return x, feat_attn
+
+    @staticmethod
+    def add_model_specific_args(parent_parser):
+        """ Specify the hyperparams for this LightningModule """
+        parser = ArgumentParser(parents=[parent_parser], add_help=False)
+        parser.add_argument("--acoustic_frames", type=int, default=20)
+        parser.add_argument("--acoustic_n_feats", type=int, default=4)
+        parser.add_argument("--acoustic_enc_hidden", type=int, default=64)
+        parser.add_argument("--acoustic_enc_layers", type=int, default=3)
+        parser.add_argument("--acoustic_hidden", type=int, default=768)
+        return parser
+
+
+# AcousticConv + Transformer over time
+class AcousticTransformer(pl.LightningModule):
     def __init__(
         self,
         frames=20,
@@ -199,25 +245,28 @@ class AcousticModel(pl.LightningModule):
 def dev():
     frames = 20
     n_feats = 4
+    x = torch.rand(4, 100, frames, n_feats)
+
     model = SPFConv(frames=frames, n_feats=n_feats, hidden=32, output_size=256)
     print(model)
 
-    x = torch.rand(4, 100, frames, n_feats)
     z = model(x)  # 4, 100, 4, 128
     print("x: ", tuple(x.shape))
     print("z: ", tuple(z.shape))
-
     gradient_check_batch(x, model)
     gradient_check_word_time(x, model)
 
-    ch_enc = Attention1D()
-
-    model = AcousticModel()
+    model = AcousticTransformer()
     print(model)
-
-    x = torch.rand(4, 100, frames, n_feats)
-
     z = model(x)  # 4, 100, 4, 128
+    print("x: ", tuple(x.shape))
+    print("z: ", tuple(z.shape))
+    gradient_check_batch(x, model)
+    gradient_check_word_time(x, model)
+
+    model = AcousticConv(enc_hidden=32, hidden=256)
+    print(model)
+    z, feat_attn = model(x)  # 4, 100, 4, 128
     print("x: ", tuple(x.shape))
     print("z: ", tuple(z.shape))
 
@@ -232,14 +281,14 @@ if __name__ == "__main__":
 
     parser = ArgumentParser()
     parser = AcousticGPTDM.add_data_specific_args(parser, datasets=["maptask"])
-    parser = AcousticModel.add_model_specific_args(parser)
+    parser = AcousticTransformer.add_model_specific_args(parser)
     args = parser.parse_args()
     args.prosody = True
 
     for k, v in vars(args).items():
         print(f"{k}: {v}")
 
-    model = AcousticModel(
+    model = AcousticTransformer(
         frames=args.acoustic_frames,
         n_feats=args.acoustic_n_feats,
         enc_hidden=args.acoustic_enc_hidden,

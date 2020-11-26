@@ -174,9 +174,9 @@ class ProxTransformer(pl.LightningModule):
 
         # Model
         parser.add_argument("--prox_hidden", default=256, type=int)
-        parser.add_argument("--prox_layers", default=2, type=int)
+        parser.add_argument("--prox_layers", default=1, type=int)
         parser.add_argument("--prox_output", default=2, type=int)
-        parser.add_argument("--prox_heads", default=4, type=int)
+        parser.add_argument("--prox_heads", default=8, type=int)
         parser.add_argument("--prox_resid_pdrop", default=0.1, type=float)
         parser.add_argument("--prox_attn_pdrop", default=0.1, type=float)
         parser.add_argument("--prox_chunk_size", default=128, type=int)

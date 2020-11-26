@@ -131,6 +131,7 @@ class TurnGPTDM(pl.LightningDataModule):
             shuffle=True,
             batch_size=self.hparams["batch_size"],
             num_workers=self.hparams["num_workers"],
+            drop_last=True,
             collate_fn=collate_fn_wrapper(self.pad_idx),
             pin_memory=True,
         )
@@ -141,6 +142,7 @@ class TurnGPTDM(pl.LightningDataModule):
             batch_size=self.hparams["batch_size"],
             num_workers=self.hparams["num_workers"],
             collate_fn=collate_fn_wrapper(self.pad_idx),
+            drop_last=True,
             pin_memory=True,
         )
 
@@ -150,6 +152,7 @@ class TurnGPTDM(pl.LightningDataModule):
             batch_size=self.hparams["batch_size"],
             num_workers=self.hparams["num_workers"],
             collate_fn=collate_fn_wrapper(self.pad_idx),
+            drop_last=True,
             pin_memory=True,
         )
 

@@ -709,6 +709,7 @@ class AcousticGPTDM(pl.LightningDataModule):
             pin_memory=True,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
         )
 
     def test_dataloader(self):
@@ -717,6 +718,7 @@ class AcousticGPTDM(pl.LightningDataModule):
             pin_memory=True,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
         )
 
     @staticmethod
