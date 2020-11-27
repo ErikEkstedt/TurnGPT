@@ -9,7 +9,6 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 
-from ttd.basebuilder import add_builder_specific_args
 from ttd.utils import get_run_dir
 
 from turngpt.TurnGPT import TurnGPT
@@ -86,7 +85,8 @@ def main():
     # Load checkpoint weights
     # strict=False because we might have more parameters in this run...
     if args.checkpoint is not None:
-        model.load_from_checkpoint(args.checkpoint, strict=False)
+        lm_state_dict = torch.load(args.checkpoint)["state_dict"]
+        model.load_state_dict(lm_state_dict, strict=False)
         print("Loaded Checkpoint: ", args.checkpoint)
     print()
 

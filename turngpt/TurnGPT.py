@@ -252,13 +252,12 @@ class TurnGPT(pl.LightningModule):
         input_ids,
         speaker_ids,
         batch_size=-1,
-        sp1_idx=None,
-        sp2_idx=None,
         steps=50,
         top_k=5,
         temperature=1.0,
         sample=True,
         stop_at_turn_shift=True,
+        max_context=100,
         use_pbar=False,
     ):
         """heavily basged on minGPT/utils in https://github.com/karpathy/minGPT """
@@ -292,9 +291,9 @@ class TurnGPT(pl.LightningModule):
 
         # past = None
         for k in pbar:
-            input_ids = input_ids[:, -self.block_size :]
+            input_ids = input_ids[:, -max_context:]
             if speaker_ids is not None:
-                speaker_ids = speaker_ids[:, -self.block_size :]
+                speaker_ids = speaker_ids[:, -max_context:]
 
             # TODO: use past in forward pass
             out = self(input_ids, speaker_ids=speaker_ids)
@@ -323,7 +322,7 @@ class TurnGPT(pl.LightningModule):
                 for i, (next_id, last_speaker) in enumerate(
                     zip(next_idx, speaker_ids[:, -1])
                 ):
-                    if next_id == sp1_idx or next_id == sp2_idx:
+                    if next_id == self.sp1_idx or next_id == self.sp2_idx:
                         next_speaker = next_id
                     else:
                         next_speaker = last_speaker
@@ -343,8 +342,8 @@ class TurnGPT(pl.LightningModule):
             # print(next_idx)
             # print(all_input_ids.shape)
             if stop_at_turn_shift:
-                sp1_batch, _ = torch.where(next_idx == sp1_idx)
-                sp2_batch, _ = torch.where(next_idx == sp2_idx)
+                sp1_batch, _ = torch.where(next_idx == self.sp1_idx)
+                sp2_batch, _ = torch.where(next_idx == self.sp2_idx)
                 sp_batch = torch.cat((sp1_batch, sp2_batch))
                 if len(sp_batch) > 0:
                     # print('pre: ', all_input_ids.shape)
