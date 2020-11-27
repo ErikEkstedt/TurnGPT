@@ -378,15 +378,18 @@ class AcousticDataset(Dataset):
         filepaths,
         sp1_idx=50257,
         sp2_idx=50258,
+        pad_idx=50256,
         sr=8000,
         word_audio_segment_time=1.0,
         hop_length=80,
         n_fft=800,
         prosody=False,
+        chunk_size=128,
     ):
         self.filepaths = filepaths
         self.sp1_idx = sp1_idx
         self.sp2_idx = sp2_idx
+        self.pad_idx = pad_idx
 
         self.sr = sr
         self.hop_length = hop_length
@@ -395,6 +398,7 @@ class AcousticDataset(Dataset):
         self.n_samples = int(sr * word_audio_segment_time)
         self.n_frames = self.n_samples // self.hop_length
         self.prosody = prosody
+        self.chunk_size = chunk_size
 
     def __len__(self):
         return len(self.filepaths)
@@ -457,9 +461,30 @@ class AcousticDataset(Dataset):
                 pros.append(p)
 
         audio = torch.stack(audio)
+        assert len(input_ids) == len(speaker_ids) == len(audio), "data not same length"
 
         if self.prosody:
             pros = torch.stack(pros)
+            assert len(pros) == len(
+                input_ids
+            ), f"data not same length {pros.shape}, {input_ids.shape}"
+
+        if self.chunk_size > 0:
+            if len(input_ids) != self.chunk_size:
+                diff = self.chunk_size - len(input_ids)
+                input_ids = torch.cat((input_ids, torch.tensor([self.pad_idx] * diff)))
+                speaker_ids = torch.cat(
+                    (speaker_ids, torch.tensor([self.pad_idx] * diff))
+                )
+
+            if len(audio) != self.chunk_size:
+                diff = self.chunk_size - len(audio)
+                audio = torch.cat((audio, torch.zeros((diff, *audio.shape[1:]))))
+
+            if self.prosody:
+                if len(pros) != self.chunk_size:
+                    diff = self.chunk_size - len(pros)
+                    pros = torch.cat((pros, torch.zeros((diff, *pros.shape[1:]))))
 
         # return {"input_ids": input_ids, "speaker_ids": speaker_ids, "audio": audio}
         return input_ids, speaker_ids, audio, pros
@@ -662,6 +687,7 @@ class AcousticGPTDM(pl.LightningDataModule):
                 hop_length=self.hop_length,
                 n_fft=self.n_fft,
                 prosody=self.prosody,
+                chunk_size=self.hparams["chunk_size"],
             )
             self.val_dset = AcousticDataset(
                 self.val_filepaths,
@@ -672,6 +698,7 @@ class AcousticGPTDM(pl.LightningDataModule):
                 hop_length=self.hop_length,
                 n_fft=self.n_fft,
                 prosody=self.prosody,
+                chunk_size=self.hparams["chunk_size"],
             )
 
         if stage == "test":
@@ -691,6 +718,7 @@ class AcousticGPTDM(pl.LightningDataModule):
                 hop_length=self.hop_length,
                 n_fft=self.n_fft,
                 prosody=self.prosody,
+                chunk_size=self.hparams["chunk_size"],
             )
 
     def train_dataloader(self):
@@ -746,7 +774,7 @@ class AcousticGPTDM(pl.LightningDataModule):
         parser.add_argument("--sample_rate", type=int, default=8000)
         parser.add_argument("--hop_time", type=float, default=0.05)
         parser.add_argument("--window_time", type=float, default=0.1)
-        parser.add_argument("--prosody", type=bool, default=False)
+        parser.add_argument("--prosody", action="store_true", default=False)
 
         if datasets is None:
             parser.add_argument(
@@ -774,15 +802,7 @@ if __name__ == "__main__":
     from ttd.basebuilder import add_builder_specific_args
 
     parser = ArgumentParser()
-    parser = AcousticGPTDM.add_data_specific_args(parser)
-    parser.add_argument(
-        "--datasets",
-        nargs="*",
-        type=str,
-        default=["maptask"],
-    )
-    datasets = parser.parse_args().datasets
-    parser = add_builder_specific_args(parser, datasets)  # add for all builders
+    parser = AcousticGPTDM.add_data_specific_args(parser, datasets=["maptask"])
     args = parser.parse_args()
     # args.prosody = True
     # args.num_workers = 0
@@ -790,14 +810,13 @@ if __name__ == "__main__":
     dm.prepare_data()
     dm.setup("fit")
 
-    loader = dm.val_dataloader()
-    for batch in loader:
+    loader = dm.train_dataloader()
+    for batch in tqdm(loader):
         input_ids, speaker_ids, audio, prosody = batch
-        print("input_ids: ", tuple(input_ids.shape))
-        if isinstance(prosody, torch.Tensor):
-            print("prosody: ", tuple(prosody.shape))
-        print("audio: ", tuple(audio.shape))
-        input()
+        # print("input_ids: ", tuple(input_ids.shape))
+        # if isinstance(prosody, torch.Tensor):
+        #     print("prosody: ", tuple(prosody.shape))
+        # print("audio: ", tuple(audio.shape))
 
     if False:
         dset = AcousticDataset(
