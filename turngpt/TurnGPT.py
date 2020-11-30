@@ -412,29 +412,34 @@ class TurnGPT(pl.LightningModule):
         labels = input_ids[:, 1:].contiguous()
         input_ids = input_ids[:, :-1].contiguous()
         speaker_ids = speaker_ids[:, :-1].contiguous()
+        ret = {
+            "input_ids": input_ids,
+            "speaker_ids": speaker_ids,
+            "labels": labels,
+        }
 
-        waveform, spf = None, None
         if len(batch) > 2:
-            waveform = batch[2][:, 1:].contiguous()
+            ret["waveform"] = batch[2][:, :-1].contiguous()
 
         if len(batch) > 3 and len(batch[3]) > 0:
-            spf = batch[3][:, 1:].contiguous()
-        else:
-            spf = None
+            ret["spf"] = batch[3][:, :-1].contiguous()
 
-        return input_ids, speaker_ids, labels, waveform, spf
+        if len(batch) > 4 and len(batch[4]) > 0:
+            ret["post_silence"] = batch[4][:, :-1].contiguous()
+
+        return ret
 
     def training_step(self, batch, *args, **kwargs):
-        input_ids, speaker_ids, labels, waveform, spf = self.shared_step(batch)
+        b = self.shared_step(batch)
 
         # LM
-        out = self(input_ids, speaker_ids, waveform, spf)
-        loss = self.loss_function_lm(out["logits"], labels)
+        out = self(b["input_ids"], b["speaker_ids"], b["waveform"], b["spf"])
+        loss = self.loss_function_lm(out["logits"], b["labels"])
 
         if "proximity_logits" in out:
             prox_losses = self.proximity_model.loss_function(
                 out["proximity_logits"],
-                labels,
+                b["labels"],
                 self.sp1_idx,
                 self.sp2_idx,
                 self.pad_idx,
@@ -490,12 +495,13 @@ class TurnGPT(pl.LightningModule):
         return {"loss": batch_parts["loss"].mean()}
 
     def validation_step(self, batch, *args, **kwargs):
-        input_ids, speaker_ids, labels, waveform, spf = self.shared_step(batch)
+        b = self.shared_step(batch)
 
         # LM
-        out = self(input_ids, speaker_ids, waveform, spf)
-        loss = self.loss_function_lm(out["logits"], labels)
-        sp_loss = self.loss_function_turn_shift(out["logits"], labels)
+        out = self(b["input_ids"], b["speaker_ids"], b["waveform"], b["spf"])
+        loss = self.loss_function_lm(out["logits"], b["labels"])
+
+        sp_loss = self.loss_function_turn_shift(out["logits"], b["labels"])
 
         self.log("val_lm_loss", loss, logger=True)
         self.log("val_sp_loss", sp_loss)
@@ -503,7 +509,7 @@ class TurnGPT(pl.LightningModule):
         if "proximity_logits" in out:
             prox_losses = self.proximity_model.loss_function(
                 out["proximity_logits"],
-                labels,
+                b["labels"],
                 self.sp1_idx,
                 self.sp2_idx,
                 self.pad_idx,

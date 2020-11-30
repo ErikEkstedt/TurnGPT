@@ -384,6 +384,7 @@ class AcousticDataset(Dataset):
         hop_length=80,
         n_fft=800,
         prosody=False,
+        post_silence=False,
         chunk_size=128,
     ):
         self.filepaths = filepaths
@@ -398,10 +399,17 @@ class AcousticDataset(Dataset):
         self.n_samples = int(sr * word_audio_segment_time)
         self.n_frames = self.n_samples // self.hop_length
         self.prosody = prosody
+        self.post_silence = post_silence
         self.chunk_size = chunk_size
 
     def __len__(self):
         return len(self.filepaths)
+
+    def get_post_silence(self, starts, ends):
+        post_silence = torch.stack((torch.tensor(starts), torch.tensor(ends)), dim=-1)
+        # post_silence = torch.tensor(starts)[1:] - torch.tensor(ends)[:-1]
+        # post_silence[post_silence < 0] = 0
+        return post_silence
 
     def __getitem__(self, idx):
         text_data_path, pros_path = self.filepaths[idx]
@@ -469,6 +477,10 @@ class AcousticDataset(Dataset):
                 input_ids
             ), f"data not same length {pros.shape}, {input_ids.shape}"
 
+        ps = []
+        if self.post_silence:
+            ps = self.get_post_silence(data["starts"], data["ends"])
+
         if self.chunk_size > 0:
             if len(input_ids) != self.chunk_size:
                 diff = self.chunk_size - len(input_ids)
@@ -487,9 +499,11 @@ class AcousticDataset(Dataset):
                     pros = torch.cat((pros, torch.zeros((diff, *pros.shape[1:]))))
 
         # return {"input_ids": input_ids, "speaker_ids": speaker_ids, "audio": audio}
-        return input_ids, speaker_ids, audio, pros
+        return input_ids, speaker_ids, audio, pros, ps
 
 
+# TODO: is the offset correct?
+# why is not speaker1/2 post_silence the same as its neighbours?
 class AcousticGPTDM(pl.LightningDataModule):
     def __init__(self, hparams, tokenizer=None, **kwargs):
         super().__init__(**kwargs)
@@ -524,6 +538,7 @@ class AcousticGPTDM(pl.LightningDataModule):
         self.n_fft = int(self.sr * self.window_time)
         self.word_audio_segment_time = hparams["word_audio_segment_time"]
         self.prosody = hparams["prosody"]
+        self.post_silence = hparams["post_silence"]
         self.word_window_size = int(self.sr * self.word_audio_segment_time)
 
         # builder
@@ -687,6 +702,7 @@ class AcousticGPTDM(pl.LightningDataModule):
                 hop_length=self.hop_length,
                 n_fft=self.n_fft,
                 prosody=self.prosody,
+                post_silence=self.post_silence,
                 chunk_size=self.hparams["chunk_size"],
             )
             self.val_dset = AcousticDataset(
@@ -698,13 +714,18 @@ class AcousticGPTDM(pl.LightningDataModule):
                 hop_length=self.hop_length,
                 n_fft=self.n_fft,
                 prosody=self.prosody,
+                post_silence=self.post_silence,
                 chunk_size=self.hparams["chunk_size"],
             )
 
         if stage == "test":
             self.test_filepaths = []
             for builder in self.builders:
+                pros_root = self.get_prosody_path(
+                    builder.root
+                )  # for current sr, hop, window size
                 for json_name in builder.test_filepaths:
+                    text_path = join(builder.task_path, json_name)
                     name = self.get_session_name(json_name)
                     pros_path = join(pros_root, name + ".pt")
                     self.test_filepaths.append((text_path, pros_path))
@@ -718,6 +739,7 @@ class AcousticGPTDM(pl.LightningDataModule):
                 hop_length=self.hop_length,
                 n_fft=self.n_fft,
                 prosody=self.prosody,
+                post_silence=self.post_silence,
                 chunk_size=self.hparams["chunk_size"],
             )
 
@@ -750,7 +772,9 @@ class AcousticGPTDM(pl.LightningDataModule):
         )
 
     @staticmethod
-    def add_data_specific_args(parent_parser, datasets=None):
+    def add_data_specific_args(
+        parent_parser, datasets=["maptask"], prosody=False, post_silence=False
+    ):
         """ Specify the hyperparams for this LightningModule """
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
 
@@ -774,22 +798,15 @@ class AcousticGPTDM(pl.LightningDataModule):
         parser.add_argument("--sample_rate", type=int, default=8000)
         parser.add_argument("--hop_time", type=float, default=0.05)
         parser.add_argument("--window_time", type=float, default=0.1)
-        parser.add_argument("--prosody", action="store_true", default=False)
+        parser.add_argument("--prosody", action="store_true", default=prosody)
+        parser.add_argument("--post_silence", action="store_true", default=post_silence)
 
-        if datasets is None:
-            parser.add_argument(
-                "--datasets",
-                nargs="*",
-                type=str,
-                default=["coached"],
-            )
-        else:
-            parser.add_argument(
-                "--datasets",
-                nargs="*",
-                type=str,
-                default=datasets,
-            )
+        parser.add_argument(
+            "--datasets",
+            nargs="*",
+            type=str,
+            default=datasets,
+        )
 
         temp_args, _ = parser.parse_known_args()
         parser = add_builder_specific_args(
@@ -799,18 +816,24 @@ class AcousticGPTDM(pl.LightningDataModule):
 
 
 if __name__ == "__main__":
-    from ttd.basebuilder import add_builder_specific_args
 
     parser = ArgumentParser()
-    parser = AcousticGPTDM.add_data_specific_args(parser, datasets=["maptask"])
+    parser = AcousticGPTDM.add_data_specific_args(
+        parser, datasets=["maptask"], post_silence=True
+    )
     args = parser.parse_args()
     # args.prosody = True
     # args.num_workers = 0
     dm = AcousticGPTDM(args)
     dm.prepare_data()
     dm.setup("fit")
+    dm.setup("test")
 
-    loader = dm.train_dataloader()
+    batch = next(iter(dm.val_dataloader()))
+    print(len(batch))
+
+    loader = dm.test_dataloader()
+
     for batch in tqdm(loader):
         input_ids, speaker_ids, audio, prosody = batch
         # print("input_ids: ", tuple(input_ids.shape))
