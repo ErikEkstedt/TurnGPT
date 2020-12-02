@@ -23,443 +23,6 @@ from ttd.tokenizer import (
 from turngpt.F0 import F0, f0_z_normalize, interpolate_forward, F0_swipe
 
 
-class BAK_AcousticDataset(Dataset):
-    def __init__(
-        self,
-        filepaths,
-        sp1_idx=50257,
-        sp2_idx=50258,
-        pad_idx=50256,
-        sr=8000,
-        word_audio_segment_time=1.0,
-        hop_length=80,
-        n_fft=800,
-        prosody=False,
-        post_silence=False,
-        chunk_size=128,
-    ):
-        self.filepaths = filepaths
-        self.sp1_idx = sp1_idx
-        self.sp2_idx = sp2_idx
-        self.pad_idx = pad_idx
-
-        self.sr = sr
-        self.hop_length = hop_length
-        self.n_fft = n_fft
-        self.word_audio_segment_time = word_audio_segment_time
-        self.n_samples = int(sr * word_audio_segment_time)
-        self.n_frames = self.n_samples // self.hop_length
-        self.prosody = prosody
-        self.post_silence = post_silence
-        self.chunk_size = chunk_size
-
-    def __len__(self):
-        return len(self.filepaths)
-
-    def get_post_silence(self, starts, ends):
-        post_silence = torch.stack((torch.tensor(starts), torch.tensor(ends)), dim=-1)
-        # post_silence = torch.tensor(starts)[1:] - torch.tensor(ends)[:-1]
-        # post_silence[post_silence < 0] = 0
-        return post_silence
-
-    def __getitem__(self, idx):
-        text_data_path, pros_path = self.filepaths[idx]
-        data = read_json(text_data_path)
-
-        speaker_ids = torch.tensor(data["speaker_ids"])
-        input_ids = torch.tensor(data["input_ids"])
-        channel = (speaker_ids == self.sp2_idx).long()
-        offset = int(min(data["starts"]) * self.sr)
-        ends = (torch.tensor(data["ends"]) * self.sr).round().long() - offset
-
-        pros = []
-        if self.prosody:
-            prosody_data = torch.load(pros_path)
-            assert self.sr == prosody_data["sr"], "sr must match sr in prosody"
-            hop_length = prosody_data["hop_length"]
-            assert (
-                self.hop_length == hop_length
-            ), f"hop_length must match hop_length in prosody, {hop_length}!={self.hop_length}"
-            n_fft = prosody_data["n_fft"]
-            assert (
-                self.n_fft == n_fft
-            ), f"n_fft must match n_fft in prosody, {n_fft}!={self.n_fft}"
-
-            # normalize prosody
-            prosody = prosody_data["prosody"]  # prosody for entire file
-            prosody = Prosody.normalize(prosody)
-
-            frame_offset = librosa.samples_to_frames(
-                offset, hop_length=self.hop_length, n_fft=self.n_fft
-            )
-            frame_ends = librosa.samples_to_frames(
-                ends, hop_length=self.hop_length, n_fft=self.n_fft
-            )
-
-        waveform, sr = torchaudio.load(data["audio"])
-        assert sr == self.sr
-
-        audio = []
-        for i, (ch, end_sample) in enumerate(zip(channel, ends)):
-            start_sample = max(end_sample - self.n_samples, 0)
-            wav = waveform[ch, start_sample:end_sample]
-            if len(wav) != self.n_samples:
-                wav = torch.cat((torch.zeros(self.n_samples - len(wav)), wav))
-            audio.append(wav)
-
-            if self.prosody:
-                end_frame = librosa.samples_to_frames(
-                    end_sample, hop_length=self.hop_length, n_fft=self.n_fft
-                )
-                start_frame = librosa.samples_to_frames(
-                    start_sample, hop_length=self.hop_length, n_fft=self.n_fft
-                )
-                p = prosody[ch, start_frame:end_frame]
-                if len(p) != self.n_frames:
-                    p = torch.cat((torch.zeros(self.n_frames - len(p), p.size(-1)), p))
-                pros.append(p)
-
-        audio = torch.stack(audio)
-        assert len(input_ids) == len(speaker_ids) == len(audio), "data not same length"
-
-        if self.prosody:
-            pros = torch.stack(pros)
-            assert len(pros) == len(
-                input_ids
-            ), f"data not same length {pros.shape}, {input_ids.shape}"
-
-        ps = []
-        if self.post_silence:
-            ps = self.get_post_silence(data["starts"], data["ends"])
-
-        if self.chunk_size > 0:
-            if len(input_ids) != self.chunk_size:
-                diff = self.chunk_size - len(input_ids)
-                input_ids = torch.cat((input_ids, torch.tensor([self.pad_idx] * diff)))
-                speaker_ids = torch.cat(
-                    (speaker_ids, torch.tensor([self.pad_idx] * diff))
-                )
-
-            if len(audio) != self.chunk_size:
-                diff = self.chunk_size - len(audio)
-                audio = torch.cat((audio, torch.zeros((diff, *audio.shape[1:]))))
-
-            if self.prosody:
-                if len(pros) != self.chunk_size:
-                    diff = self.chunk_size - len(pros)
-                    pros = torch.cat((pros, torch.zeros((diff, *pros.shape[1:]))))
-
-        # return {"input_ids": input_ids, "speaker_ids": speaker_ids, "audio": audio}
-        return input_ids, speaker_ids, audio, pros, ps
-
-
-class AcousticGPTDM(pl.LightningDataModule):
-    def __init__(self, hparams, tokenizer=None, **kwargs):
-        super().__init__(**kwargs)
-        if not isinstance(hparams, dict):
-            hparams = vars(hparams)
-        self.hparams = hparams
-
-        # Tokenizer
-        if tokenizer is not None:
-            self.tokenizer = tokenizer
-        else:
-            special_token_dict = get_special_tokens_dict(
-                hparams["tokenizer_special_dict"]
-            )
-            self.tokenizer = load_turngpt_tokenizer(
-                pretrained=hparams["tokenizer_pretrained"],
-                special_token_dict=special_token_dict,
-            )
-        self.sp1_idx = self.tokenizer.convert_tokens_to_ids("<speaker1>")
-        self.sp2_idx = self.tokenizer.convert_tokens_to_ids("<speaker2>")
-        self.pad_idx = self.tokenizer.pad_token_id
-
-        # audio
-        self.sr = hparams["sample_rate"]
-        self.hop_time = hparams["hop_time"]
-        self.hop_length = int(self.sr * self.hop_time)
-        self.word_audio_segment_time = hparams["word_audio_segment_time"]
-        self.f0 = hparams["f0"]
-        self.post_silence = hparams["post_silence"]
-        self.word_window_size = int(self.sr * self.word_audio_segment_time)
-
-        # Training
-        self.batch_size = hparams["batch_size"]
-        self.num_workers = hparams["num_workers"]
-
-        # builder
-        self.builders = create_builders(hparams)
-
-    def get_prosody_path(self, root):
-        prosody_path = join(root, "prosody")
-        prosody_path += f"_sr-{self.sr}_hop-{self.hop_time}_win-{self.window_time}"
-        return prosody_path
-
-    def get_session_name(self, name):
-        return name.replace(".json", "").split("_#")[0]
-
-    def prepare_f0(self, builder, tok_path):
-        """
-        Extracts Un-normalized prosody for the dialog audio and saves to pros path
-        """
-        prosody_path = self.get_prosody_path(builder.root)
-        print(prosody_path)
-
-        if not exists(prosody_path) or len(listdir(prosody_path)) < 10:
-            makedirs(prosody_path, exist_ok=True)
-            prosody_encoder = F0(
-                self.sr,
-                hop_time=self.hop_time,
-                f0_min=60,
-                f0_max=300,
-                f0_threshold=0.3,
-                f0_interpolate=False,
-                f0_log=False,
-                normalize=False,
-            )
-
-            for text_data_path in tqdm(
-                glob(join(tok_path, "*.json")),
-                desc=f"Prosody segments {builder.NAME}",
-            ):
-                text_data = read_json(text_data_path)
-                name = basename(text_data_path).replace(".json", "")
-                audio_path = builder.get_audio_path(name)
-
-                # load audio
-                waveform, tmp_sr = torchaudio.load(builder.get_audio_path(name))
-                if tmp_sr != self.sr:
-                    resampler = AT.Resample(orig_freq=tmp_sr, new_freq=self.sr)
-                    waveform = resampler(waveform)
-
-                prosody = prosody_encoder(waveform)
-                pros = {
-                    "sr": self.sr,
-                    "hop_length": self.hop_length,
-                    "n_fft": self.n_fft,
-                    "prosody": prosody,
-                }
-                pros_path = join(prosody_path, name + ".pt")
-                torch.save(pros, pros_path)
-
-                text_data["prosody"] = pros_path
-                text_data["audio"] = audio_path
-                write_json(text_data, text_data_path)
-
-    def prepare_chunked_audio(self, builder, chunked_path):
-        """
-        Extracting audio segments correlated with the relevant chunk
-        """
-        audio_path = join(chunked_path, "audio")
-
-        # Prepare audio for chunked-tokenized dialogs
-        # audio might be slow to load because some dialogs are long
-        # new_chunked_path = chunked_path + "_" + "audio"
-        if not exists(audio_path) or len(listdir(audio_path)) < 10:
-            makedirs(audio_path, exist_ok=True)
-            for text_data_path in tqdm(
-                glob(join(chunked_path, "*.json")),
-                desc=f"Add audio segments {builder.NAME}",
-            ):
-                text_data = read_json(text_data_path)
-                chunk_name = basename(text_data_path).replace(".json", "")
-                name = chunk_name.split("_#")[0]
-
-                # load audio
-                waveform, tmp_sr = torchaudio.load(builder.get_audio_path(name))
-                if tmp_sr != self.sr:
-                    resampler = AT.Resample(orig_freq=tmp_sr, new_freq=self.sr)
-                    waveform = resampler(waveform)
-
-                start = int(min(text_data["starts"]) * self.sr)
-                end = round(max(text_data["ends"]) * self.sr)
-                tmp_waveform = waveform[:, start:end]
-
-                try:
-                    # save audio clip for this chunked segment
-                    tmp_audio_path = join(audio_path, f"{chunk_name}_audio.wav")
-                    torchaudio.save(tmp_audio_path, tmp_waveform, sample_rate=self.sr)
-                    text_data["audio"] = tmp_audio_path
-
-                    # overwrite the data with the added audio path
-                    write_json(text_data, text_data_path)
-                except:
-                    print("Broken: ", chunk_name)
-
-    def prepare_data(self):
-        for i, builder in enumerate(self.builders):
-
-            # prepare explicit turns
-            tok_path = builder.prepare_explicit_turn_level_tokens(
-                tokenizer=self.tokenizer, EOT_token_id=self.hparams["EOT_token_id"]
-            )
-
-            # prepares prosody for each audio file
-            # savedir:
-            #   builder.root/prosody_sr-{self.sr}_hop-{self.hop_time}_win-{self.window_time}
-            self.prepare_prosody(builder, tok_path)
-
-            # prepare chunks
-            chunked_path = builder.prepare_chunked_tokens(
-                tok_path,
-                chunk_size=self.hparams["chunk_size"],
-                overlap=self.hparams["chunk_overlap"],
-                keep_length=self.hparams["chunk_keep_length"],
-            )
-
-            # splits audio for tokenized chunks for faster load
-            self.prepare_chunked_audio(builder, chunked_path)
-
-            # we get more files after chunking then dialogs we defined in the splits
-            # this changes the splits to include all chunks
-            builder.task_path = chunked_path  # used in dm.setup()
-            builder.transform_split_filepaths_with_chunks(builder.task_path)
-
-    def setup(self, stage="fit"):
-        if stage == "fit" or stage is None:
-            self.train_filepaths = []
-            self.val_filepaths = []
-
-            for builder in self.builders:
-                pros_root = self.get_prosody_path(
-                    builder.root
-                )  # for current sr, hop, window size
-                for json_name in builder.train_filepaths:
-                    # task path points to folder for current task
-                    # e.g. root/tokenized_turn_level_explicit_turns_chunk-128
-                    text_path = join(builder.task_path, json_name)
-                    name = self.get_session_name(json_name)
-                    pros_path = join(pros_root, name + ".pt")
-                    self.train_filepaths.append((text_path, pros_path))
-
-                for json_name in builder.val_filepaths:
-                    text_path = join(builder.task_path, json_name)
-                    name = self.get_session_name(json_name)
-                    pros_path = join(pros_root, name + ".pt")
-                    self.val_filepaths.append((text_path, pros_path))
-
-            self.train_dset = AcousticDataset(
-                self.train_filepaths,
-                sr=self.sr,
-                word_audio_segment_time=self.word_audio_segment_time,
-                sp1_idx=self.sp1_idx,
-                sp2_idx=self.sp2_idx,
-                hop_length=self.hop_length,
-                n_fft=self.n_fft,
-                prosody=self.prosody,
-                post_silence=self.post_silence,
-                chunk_size=self.hparams["chunk_size"],
-            )
-            self.val_dset = AcousticDataset(
-                self.val_filepaths,
-                sr=self.sr,
-                word_audio_segment_time=self.word_audio_segment_time,
-                sp1_idx=self.sp1_idx,
-                sp2_idx=self.sp2_idx,
-                hop_length=self.hop_length,
-                n_fft=self.n_fft,
-                prosody=self.prosody,
-                post_silence=self.post_silence,
-                chunk_size=self.hparams["chunk_size"],
-            )
-
-        if stage == "test":
-            self.test_filepaths = []
-            for builder in self.builders:
-                pros_root = self.get_prosody_path(
-                    builder.root
-                )  # for current sr, hop, window size
-                for json_name in builder.test_filepaths:
-                    text_path = join(builder.task_path, json_name)
-                    name = self.get_session_name(json_name)
-                    pros_path = join(pros_root, name + ".pt")
-                    self.test_filepaths.append((text_path, pros_path))
-
-            self.test_dset = AcousticDataset(
-                self.test_filepaths,
-                sr=self.sr,
-                word_audio_segment_time=self.word_audio_segment_time,
-                sp1_idx=self.sp1_idx,
-                sp2_idx=self.sp2_idx,
-                hop_length=self.hop_length,
-                n_fft=self.n_fft,
-                prosody=self.prosody,
-                post_silence=self.post_silence,
-                chunk_size=self.hparams["chunk_size"],
-            )
-
-    def train_dataloader(self):
-        return DataLoader(
-            self.train_dset,
-            shuffle=True,
-            pin_memory=True,
-            drop_last=True,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-        )
-
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_dset,
-            pin_memory=True,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            drop_last=True,
-        )
-
-    def test_dataloader(self):
-        return DataLoader(
-            self.test_dset,
-            pin_memory=True,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            drop_last=True,
-        )
-
-    @staticmethod
-    def add_data_specific_args(
-        parent_parser, datasets=["maptask"], f0=False, post_silence=False
-    ):
-        """ Specify the hyperparams for this LightningModule """
-        parser = ArgumentParser(parents=[parent_parser], add_help=False)
-
-        # Tokens
-        parser.add_argument("--tokenizer_pretrained", type=str, default="gpt2")
-        parser.add_argument(
-            "--tokenizer_special_dict", type=str, default="TurnGPT_TOKENS"
-        )
-        parser.add_argument("--explicit_turns", type=bool, default=True)
-        parser.add_argument("--EOT_token_id", type=int, default=None)
-        parser.add_argument("--chunk_size", type=int, default=128)
-        parser.add_argument("--chunk_overlap", type=int, default=10)
-        parser.add_argument("--chunk_keep_length", type=int, default=20)
-
-        # Training
-        parser.add_argument("--batch_size", type=int, default=4)
-        parser.add_argument("--num_workers", type=int, default=4)
-
-        # Audio
-        parser.add_argument("--word_audio_segment_time", type=float, default=1)
-        parser.add_argument("--sample_rate", type=int, default=8000)
-        parser.add_argument("--hop_time", type=float, default=0.05)
-        parser.add_argument("--f0", action="store_true", default=f0)
-        parser.add_argument("--post_silence", action="store_true", default=post_silence)
-
-        parser.add_argument(
-            "--datasets",
-            nargs="*",
-            type=str,
-            default=datasets,
-        )
-
-        temp_args, _ = parser.parse_known_args()
-        parser = add_builder_specific_args(
-            parser, temp_args.datasets
-        )  # add for all builders
-        return parser
-
-
 def get_f0_path(root, sr, hop_time):
     f0_path = join(root, "f0")
     f0_path += f"_sr-{sr}_hop-{hop_time}"
@@ -478,6 +41,7 @@ class AcousticDataset(Dataset):
         sp2_idx=50258,
         pad_idx=50256,
         f0=False,
+        rms=False,
         waveform=False,
         post_silence=False,
         sr=8000,
@@ -486,6 +50,7 @@ class AcousticDataset(Dataset):
         chunk_size=128,
         normalize_f0=False,
         interpolate_f0=False,
+        log_rms=False,
     ):
         self.filepaths = filepaths
         self.sp1_idx = sp1_idx
@@ -495,8 +60,12 @@ class AcousticDataset(Dataset):
 
         # features
         self.f0 = f0
+        self.rms = rms
+        if rms:
+            waveform = True
         self.normalize_f0 = normalize_f0
         self.interpolate_f0 = interpolate_f0
+        self.log_rms = log_rms
         self.waveform = waveform
         self.post_silence = post_silence
 
@@ -579,24 +148,26 @@ class AcousticDataset(Dataset):
             f0_stack.append(tmp_f0)
         return torch.stack(f0_stack)
 
-    def pad_to_chunk(self, input_ids, speaker_ids, audio=None, f0=None):
-        if self.chunk_size > 0:
-            if len(input_ids) != self.chunk_size:
-                diff = self.chunk_size - len(input_ids)
-                input_ids = torch.cat((input_ids, torch.tensor([self.pad_idx] * diff)))
-                speaker_ids = torch.cat(
-                    (speaker_ids, torch.tensor([self.pad_idx] * diff))
-                )
+    def extract_rms(self, waveform):
+        # waveform: B, n_samples
+        rms = []
+        for w in waveform:
+            _rms = torch.from_numpy(
+                librosa.feature.rms(w, hop_length=80, frame_length=160)[0, :-1]
+            )  # omit last frame for size
+            rms.append(_rms)
+        return torch.stack(rms)
 
-            # if len(audio) != self.chunk_size:
-            #     diff = self.chunk_size - len(audio)
-            #     audio = torch.cat((audio, torch.zeros((diff, *audio.shape[1:]))))
-
-            # if self.f0:
-            #     if len(pros) != self.chunk_size:
-            #         diff = self.chunk_size - len(pros)
-            #         pros = torch.cat((pros, torch.zeros((diff, *pros.shape[1:]))))
-        return input_ids, speaker_ids, audio, f0
+    def pad_to_chunk_size(self, ret):
+        # if len(ret['input_ids']) != self.chunk_size:
+        for k, v in ret.items():
+            diff = self.chunk_size - len(v)
+            if diff > 0:
+                if k in ["input_ids", "speaker_ids"]:
+                    ret[k] = torch.cat((v, torch.tensor([self.pad_idx] * diff)))
+                else:
+                    ret[k] = torch.cat((v, torch.zeros((diff, v.shape[-1]))))
+        return ret
 
     def __getitem__(self, idx):
         text_data_path = self.filepaths[idx]
@@ -605,8 +176,16 @@ class AcousticDataset(Dataset):
         input_ids = torch.tensor(data["input_ids"])
 
         ret = {"input_ids": input_ids, "speaker_ids": speaker_ids}
-
         channel = (speaker_ids == self.sp2_idx).long()  # relevant speaker
+
+        if self.waveform:
+            waveform_stack = self.extract_waveform_segments(
+                input_ids, channel, data["starts"], data["ends"], data["audio"]
+            )
+            assert (
+                len(input_ids) == len(speaker_ids) == len(waveform_stack)
+            ), "waveform data not same length"
+            ret["waveform"] = waveform_stack
 
         # load f0 if needed
         if self.f0:
@@ -623,22 +202,26 @@ class AcousticDataset(Dataset):
             if self.interpolate_f0:
                 f0_dict["f0"] = interpolate_forward(f0_dict["f0"], f0_dict["voiced"])
 
-            f0 = self.extract_f0_segments(
-                input_ids, channel, data["ends"], f0_dict["f0"]
-            )
+            try:
+                f0 = self.extract_f0_segments(
+                    input_ids, channel, data["ends"], f0_dict["f0"]
+                )
+            except:
+                print("f0: ", f0_dict["f0"].shape)
+                print("path: ", text_data_path)
+                print(data["starts"][0], data["ends"][-1])
             assert len(f0) == len(
                 input_ids
             ), f"f0 data not same length {f0.shape}, {input_ids.shape}"
             ret["f0"] = f0
 
-        if self.waveform:
-            waveform_stack = self.extract_waveform_segments(
-                input_ids, channel, data["starts"], data["ends"], data["audio"]
-            )
-            assert (
-                len(input_ids) == len(speaker_ids) == len(waveform_stack)
-            ), "waveform data not same length"
-            ret["waveform"] = waveform_stack
+        if self.rms:
+            ret["rms"] = self.extract_rms(ret["waveform"])
+            if self.log_rms:
+                ret["rms"] = torch.log(ret["rms"] + 1e-8)
+            assert len(ret["rms"]) == len(
+                input_ids
+            ), f"rms not same length {ret['rms'].shape}, {input_ids.shape}"
 
         if self.post_silence:
             ps = self.get_post_silence(data["starts"], data["ends"])
@@ -647,10 +230,13 @@ class AcousticDataset(Dataset):
             ), f"post-silence not same length {ps.shape}, {input_ids.shape}"
             ret["post_silence"] = ps
 
+        if self.chunk_size > 0:
+            ret = self.pad_to_chunk_size(ret)
+
         return ret
 
 
-class DM(pl.LightningDataModule):
+class AudioDM(pl.LightningDataModule):
     def __init__(self, hparams, tokenizer=None, **kwargs):
         super().__init__(**kwargs)
         if not isinstance(hparams, dict):
@@ -676,6 +262,8 @@ class DM(pl.LightningDataModule):
         # Features
         self.waveform = hparams["waveform"]
         self.f0 = hparams["f0"]
+        self.rms = hparams["rms"]
+        self.log_rms = hparams["log_rms"]
         self.interpolate_f0 = hparams["interpolate_f0"]
         self.normalize_f0 = hparams["normalize_f0"]
 
@@ -807,6 +395,8 @@ class DM(pl.LightningDataModule):
             chunk_size=self.hparams["chunk_size"],
             waveform=self.waveform,
             f0=self.f0,
+            rms=self.rms,
+            log_rms=self.log_rms,
             normalize_f0=self.normalize_f0,
             interpolate_f0=self.interpolate_f0,
             post_silence=self.post_silence,
@@ -872,6 +462,8 @@ class DM(pl.LightningDataModule):
         datasets=["maptask"],
         waveform=False,
         f0=False,
+        rms=False,
+        log_rms=False,
         normalize_f0=False,
         interpolate_f0=False,
         post_silence=False,
@@ -897,6 +489,8 @@ class DM(pl.LightningDataModule):
         # Features
         parser.add_argument("--waveform", action="store_true", default=waveform)
         parser.add_argument("--f0", action="store_true", default=f0)
+        parser.add_argument("--rms", action="store_true", default=rms)
+        parser.add_argument("--log_rms", action="store_true", default=log_rms)
         parser.add_argument("--normalize_f0", action="store_true", default=normalize_f0)
         parser.add_argument(
             "--interpolate_f0", action="store_true", default=interpolate_f0
@@ -976,14 +570,16 @@ def main():
 
 if __name__ == "__main__":
 
+    pl.seed_everything(1234)
     import sounddevice as sd
     from ttd.tokenizer_helpers import convert_ids_to_tokens
     import matplotlib.pyplot as plt
 
     parser = ArgumentParser()
-    parser = DM.add_data_specific_args(
+    parser = AudioDM.add_data_specific_args(
         parser,
-        datasets=["maptask"],
+        # datasets=["maptask"],
+        datasets=["switchboard"],
         f0=True,
         waveform=True,
         normalize_f0=True,
@@ -992,73 +588,99 @@ if __name__ == "__main__":
     args = parser.parse_args()
     for k, v in vars(args).items():
         print(f"{k}: {v}")
-    dm = DM(args)
+    args.batch_size = 16
+    dm = AudioDM(args)
     dm.prepare_data()
     dm.setup("fit")
-    loader = dm.val_dataloader()
-    batch = next(iter(loader))
+    loader = dm.train_dataloader()
 
-    b = 1
-    input_ids = batch["input_ids"][0]
-    speaker_ids = batch["speaker_ids"][0]
-    print("input_ids: ", tuple(input_ids.shape))
-    print("speaker_ids: ", tuple(speaker_ids.shape))
-    if "waveform" in batch:
-        waveform = batch["waveform"][0]
-        print("waveform: ", tuple(waveform.shape))
-    if "f0" in batch:
-        f0 = batch["f0"][0]
-        print("f0: ", tuple(f0.shape))
+    for batch in tqdm(loader, desc="train"):
+        input_ids = batch["input_ids"]
+        speaker_ids = batch["speaker_ids"]
+        # print("input_ids: ", tuple(input_ids.shape))
+        # print("speaker_ids: ", tuple(speaker_ids.shape))
+        # print("-" * 30)
 
-    fig, ax = plt.subplots(2, 1, figsize=(9, 6))
-    for ids, wave, _f0 in zip(input_ids, waveform, f0):
-        tok = convert_ids_to_tokens(ids, dm.tokenizer)
-        # ff0 = F0_swipe(wave, hop_length=80, sr=8000)
-        print(tok[0])
-        sd.play(wave, samplerate=dm.sr)
-        for a in ax:
-            a.cla()
-        ax[0].plot(wave)
-        ax[0].set_ylim([-0.5, 0.5])
-        ax[1].plot(_f0)
-        # ax[1].plot(ff0)
-        ax[1].set_ylim([-2.0, 2.0])
-        # ax[1].set_ylim([0, 250.0])
-        plt.pause(0.01)
-        input()
-        print()
+    # loader = dm.val_dataloader()
+    # for batch in tqdm(loader, desc="val"):
+    #     input_ids = batch["input_ids"]
+    #     speaker_ids = batch["speaker_ids"]
+    #     print("input_ids: ", tuple(input_ids.shape))
+    #     print("speaker_ids: ", tuple(speaker_ids.shape))
+    #     print("-" * 30)
 
-    import matplotlib.pyplot as plt
+    # dm.setup("test")
+    # loader = dm.test_dataloader()
+    # for batch in tqdm(loader, desc="test"):
+    #     input_ids = batch["input_ids"]
+    #     speaker_ids = batch["speaker_ids"]
+    #     print("input_ids: ", tuple(input_ids.shape))
+    #     print("speaker_ids: ", tuple(speaker_ids.shape))
+    #     print("-" * 30)
 
-    fig, ax = plt.subplots(1, 1, figsize=(9, 6))
-    for batch in tqdm(loader):
-        # input_ids, speaker_ids, audio, prosody = batch
-        input_ids, speaker_ids, audio, pros, ps = batch
+    if False:
+        batch = next(iter(loader))
+        b = 1
+        input_ids = batch["input_ids"][0]
+        speaker_ids = batch["speaker_ids"][0]
         print("input_ids: ", tuple(input_ids.shape))
         print("speaker_ids: ", tuple(speaker_ids.shape))
-        print("audio: ", tuple(audio.shape))
-        print("pros: ", tuple(pros.shape))
-        input()
-        # print("input_ids: ", tuple(input_ids.shape))
-        # if isinstance(prosody, torch.Tensor):
-        #     print("prosody: ", tuple(prosody.shape))
-        # print("audio: ", tuple(audio.shape))
+        if "waveform" in batch:
+            waveform = batch["waveform"][0]
+            print("waveform: ", tuple(waveform.shape))
+        if "f0" in batch:
+            f0 = batch["f0"][0]
+            print("f0: ", tuple(f0.shape))
 
-        for p in pros:
-            for tp in p:
-                ax.cla()
-                ax.plot(tp[:, 0].unsqueeze(1), label="pitch")
-                # ax.plot(tp[:, 1].unsqueeze(1), label="voiced")
-                # ax.plot(tp[:, 3].unsqueeze(1), label="zcr")
-                ax.plot(tp[:, 3].unsqueeze(1), label="rms")
-                ax.legend()
-                plt.pause(0.001)
-                input()
+        fig, ax = plt.subplots(2, 1, figsize=(9, 6))
+        for ids, wave, _f0 in zip(input_ids, waveform, f0):
+            tok = convert_ids_to_tokens(ids, dm.tokenizer)
+            # ff0 = F0_swipe(wave, hop_length=80, sr=8000)
+            print(tok[0])
+            sd.play(wave, samplerate=dm.sr)
+            for a in ax:
+                a.cla()
+            ax[0].plot(wave)
+            ax[0].set_ylim([-0.5, 0.5])
+            ax[1].plot(_f0)
+            # ax[1].plot(ff0)
+            ax[1].set_ylim([-2.0, 2.0])
+            # ax[1].set_ylim([0, 250.0])
+            plt.pause(0.01)
+            input()
+            print()
 
-    p = pros[0]  # B, T, 1
-    p = pros[0, :, :, 0]  # B, T
-    v = pros[0, :, :, 1]  # B, T
+        import matplotlib.pyplot as plt
 
-    from ttd.utils import find_island_idx_len
+        fig, ax = plt.subplots(1, 1, figsize=(9, 6))
+        for batch in tqdm(loader):
+            # input_ids, speaker_ids, audio, prosody = batch
+            input_ids, speaker_ids, audio, pros, ps = batch
+            print("input_ids: ", tuple(input_ids.shape))
+            print("speaker_ids: ", tuple(speaker_ids.shape))
+            print("audio: ", tuple(audio.shape))
+            print("pros: ", tuple(pros.shape))
+            input()
+            # print("input_ids: ", tuple(input_ids.shape))
+            # if isinstance(prosody, torch.Tensor):
+            #     print("prosody: ", tuple(prosody.shape))
+            # print("audio: ", tuple(audio.shape))
 
-    idx, dur, val = find_island_idx_len(v[0])
+            for p in pros:
+                for tp in p:
+                    ax.cla()
+                    ax.plot(tp[:, 0].unsqueeze(1), label="pitch")
+                    # ax.plot(tp[:, 1].unsqueeze(1), label="voiced")
+                    # ax.plot(tp[:, 3].unsqueeze(1), label="zcr")
+                    ax.plot(tp[:, 3].unsqueeze(1), label="rms")
+                    ax.legend()
+                    plt.pause(0.001)
+                    input()
+
+        p = pros[0]  # B, T, 1
+        p = pros[0, :, :, 0]  # B, T
+        v = pros[0, :, :, 1]  # B, T
+
+        from ttd.utils import find_island_idx_len
+
+        idx, dur, val = find_island_idx_len(v[0])

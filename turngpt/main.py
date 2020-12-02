@@ -43,7 +43,7 @@ def main():
     # ------------------------------------------------------------------
     # Data
     print("\nDataLoader")
-    if args.audio:
+    if args.audio or args.prosody:
         dm = AcousticGPTDM(args)
         print("sample rate: ", args.sample_rate)
         print("hop time: ", args.hop_time)

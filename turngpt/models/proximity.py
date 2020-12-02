@@ -111,11 +111,32 @@ class ProxTransformer(pl.LightningModule):
         self.ln_f = nn.LayerNorm(hidden_size)
         self.head = nn.Linear(hidden_size, self.output_size, bias=True)
 
-    def forward(self, x):
+    def forward(self, x, output_attention=False):
         x = self.pre_layer(x)
+        if output_attention:
+            self._set_attention()
         x = self.blocks(x)
-        x = self.ln_f(x)
-        return self.head(x)
+        x = self.head(self.ln_f(x))
+        out = {"logits": x}
+        if output_attention:
+            out["prox_attn"] = self._get_attention()
+        return out
+
+    def _set_attention(self):
+        for block in self.blocks:
+            block.output_attention = True
+
+    def _unset_attention(self):
+        for block in self.blocks:
+            block.output_attention = False
+
+    def _get_attention(self):
+        attn = []
+        for block in self.blocks:
+            _attn = block.attn.attention
+            if _attn is not None:
+                attn.append(_attn)
+        return torch.stack(attn)
 
     def create_label(self, labels, sp1_idx, sp2_idx):
         proximity_labels = labels == sp1_idx
@@ -173,7 +194,7 @@ class ProxTransformer(pl.LightningModule):
         )
 
         # Model
-        parser.add_argument("--prox_hidden", default=256, type=int)
+        parser.add_argument("--prox_hidden", default=128, type=int)
         parser.add_argument("--prox_layers", default=1, type=int)
         parser.add_argument("--prox_output", default=2, type=int)
         parser.add_argument("--prox_heads", default=8, type=int)

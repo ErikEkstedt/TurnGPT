@@ -47,11 +47,7 @@ class GPT1Config(GPTConfig):
 
 
 class CausalSelfAttention(nn.Module):
-    """
-    A vanilla multi-head masked self-attention layer with a projection at the end.
-    I believe I could have just used torch.nn.MultiheadAttention but their documentation
-    is all but absent and code ugly so I don't trust it, rolling my own here.
-    """
+    """ https://github.com/karpathy/minGPT """
 
     def __init__(self, config):
         super().__init__()
@@ -74,7 +70,9 @@ class CausalSelfAttention(nn.Module):
         )
         self.n_head = config.n_head
 
-    def forward(self, x, layer_past=None):
+        self.attention = None  # dummy for storing att
+
+    def forward(self, x, output_attention=False):
         B, T, C = x.size()
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -93,6 +91,10 @@ class CausalSelfAttention(nn.Module):
         att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float("-inf"))
         att = F.softmax(att, dim=-1)
         att = self.attn_drop(att)
+
+        if output_attention:
+            self.attention = att.detach().cpu()
+
         y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = (
             y.transpose(1, 2).contiguous().view(B, T, C)
@@ -118,8 +120,10 @@ class Block(nn.Module):
             nn.Dropout(config.resid_pdrop),
         )
 
+        self.output_attention = False
+
     def forward(self, x):
-        x = x + self.attn(self.ln1(x))
+        x = x + self.attn(self.ln1(x), self.output_attention)
         x = x + self.mlp(self.ln2(x))
         return x
 
@@ -208,16 +212,36 @@ class GPT(nn.Module):
         x = self.drop(total_emb)
         return x
 
+    def _set_attention(self):
+        for block in self.blocks:
+            block.output_attention = True
+
+    def _unset_attention(self):
+        for block in self.blocks:
+            block.output_attention = False
+
+    def _get_attention(self):
+        attn = []
+        for block in self.blocks:
+            _attn = block.attn.attention
+            if _attn is not None:
+                attn.append(_attn)
+        return torch.stack(attn)
+
     def body(self, input_ids, speaker_ids, **kwargs):
         x = self.embedding(input_ids, speaker_ids)
         x = self.blocks(x)
         x = self.ln_f(x)
         return x
 
-    def forward(self, idx, speaker_ids=None):
+    def forward(self, idx, speaker_ids=None, output_attention=False):
+        if output_attention:
+            self._set_attention()
         z = self.body(idx, speaker_ids)
         output = {"z": z}
         output["logits"] = self.head(z)
+        if output_attention:
+            output["attn"] = self._get_attention()
         return output
 
     @staticmethod
@@ -245,10 +269,17 @@ if __name__ == "__main__":
 
     tokenizer = load_turngpt_tokenizer()
 
-    config = GPT1Config(
-        vocab_size=len(tokenizer), block_size=256, n_embd=256, n_head=8, n_layer=8
+    model = GPT(
+        n_vocab=len(tokenizer),
+        n_embd=256,
+        n_head=8,
+        n_layer=4,
+        embd_pdrop=0.1,
+        resid_pdrop=0.1,
+        attn_pdrop=0.1,
+        use_speaker_emb=True,
+        chunk_size=128,
     )
-    model = GPT(config)
 
     print("model: ", model.get_size())
 
@@ -264,4 +295,13 @@ if __name__ == "__main__":
     y = input_ids[:, 1:].contiguous()
     input_ids = input_ids[:, :-1].contiguous()
     speaker_ids = speaker_ids[:, :-1]
-    out = model(input_ids, speaker_ids, targets=y)
+
+    input_ids = torch.cat([input_ids] * 4)
+    speaker_ids = torch.cat([speaker_ids] * 4)
+
+    out = model(input_ids, speaker_ids)
+    print(out.keys())
+
+    out = model(input_ids, speaker_ids, output_attention=True)
+    print(out.keys())
+    print(out["attn"].shape)
