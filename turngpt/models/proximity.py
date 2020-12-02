@@ -66,6 +66,26 @@ class ProxRNN(pl.LightningModule):
         return parser
 
 
+def dev_rnn():
+    from turngpt.models import gradient_check_batch, gradient_check_word_time
+
+    parser = ArgumentParser()
+    parser = ProxRNN.add_model_specific_args(parser)
+    args = parser.parse_args()
+    for k, v in vars(args).items():
+        print(f"{k}: {v}")
+    model = ProxRNN(
+        input_size=768,
+        hidden_size=args.prox_hidden,
+        output_size=args.prox_output,
+        num_layers=args.prox_layers,
+    )
+    print(model)
+    inp = torch.rand(4, 128, 768)
+    gradient_check_batch(inp, model)
+    gradient_check_word_time(inp, model)
+
+
 class ProxTransformer(pl.LightningModule):
     def __init__(
         self,
@@ -76,8 +96,9 @@ class ProxTransformer(pl.LightningModule):
         n_layer=1,
         resid_pdrop=0.1,
         attn_pdrop=0.1,
+        dropout=0.1,
         chunk_size=128,
-        loss_constants=[1, 1],
+        horizon_constants=[1, 1],
     ):
         super().__init__()
         if isinstance(horizon, int):
@@ -85,9 +106,10 @@ class ProxTransformer(pl.LightningModule):
         self.horizon = horizon
         self.output_size = len(self.horizon)
         self.input_size = input_size
-        self.loss_constants = loss_constants
+        self.horizon_constants = horizon_constants
+        self.chunk_size = chunk_size
         assert len(horizon) == len(
-            loss_constants
+            horizon_constants
         ), "horizon and horizon constant must be of same length!"
 
         if input_size != hidden_size:
@@ -105,21 +127,45 @@ class ProxTransformer(pl.LightningModule):
         )
 
         # transformer
+        self.dropout = nn.Dropout(dropout)
+        self.pos_emb = nn.Parameter(torch.zeros(1, self.chunk_size, hidden_size))
         self.blocks = nn.Sequential(*[Block(self.config) for _ in range(n_layer)])
 
         # head
         self.ln_f = nn.LayerNorm(hidden_size)
         self.head = nn.Linear(hidden_size, self.output_size, bias=True)
 
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def embedding(self, x):
+        B, N, D = x.size()
+        assert N <= self.chunk_size, "Cannot forward, model chunk size is exhausted."
+
+        # forward the GPT model
+        # each position maps to a (learnable) vector
+        position_embeddings = self.pos_emb[:, :N]
+        x = x + position_embeddings
+        return self.dropout(x)
+
     def forward(self, x, output_attention=False):
         x = self.pre_layer(x)
+        x = self.embedding(x)
         if output_attention:
             self._set_attention()
         x = self.blocks(x)
         x = self.head(self.ln_f(x))
         out = {"logits": x}
         if output_attention:
-            out["prox_attn"] = self._get_attention()
+            out["attn_prox"] = self._get_attention()
         return out
 
     def _set_attention(self):
@@ -136,7 +182,7 @@ class ProxTransformer(pl.LightningModule):
             _attn = block.attn.attention
             if _attn is not None:
                 attn.append(_attn)
-        return torch.stack(attn)
+        return torch.stack(attn, dim=1)
 
     def create_label(self, labels, sp1_idx, sp2_idx):
         proximity_labels = labels == sp1_idx
@@ -181,7 +227,7 @@ class ProxTransformer(pl.LightningModule):
                 tmp_loss = F.binary_cross_entropy_with_logits(
                     logits[:, : label.shape[1], head], label
                 )
-            loss += self.loss_constants[head] * tmp_loss
+            loss += self.horizon_constants[head] * tmp_loss
             losses[f"horizon_{horizon}"] = tmp_loss.detach().item()
         losses["loss"] = loss
         return losses
@@ -196,10 +242,10 @@ class ProxTransformer(pl.LightningModule):
         # Model
         parser.add_argument("--prox_hidden", default=128, type=int)
         parser.add_argument("--prox_layers", default=1, type=int)
-        parser.add_argument("--prox_output", default=2, type=int)
         parser.add_argument("--prox_heads", default=8, type=int)
         parser.add_argument("--prox_resid_pdrop", default=0.1, type=float)
         parser.add_argument("--prox_attn_pdrop", default=0.1, type=float)
+        parser.add_argument("--prox_dropout", default=0.1, type=float)
         parser.add_argument("--prox_chunk_size", default=128, type=int)
         parser.add_argument(
             "--prox_horizon",
@@ -218,63 +264,51 @@ class ProxTransformer(pl.LightningModule):
 
 if __name__ == "__main__":
 
-    # from acousticgpt.acoustic_gpt import gradient_check_batch, gradient_check_word_time
+    from turngpt.acousticDM import AudioDM
 
-    # parser = ArgumentParser()
-    # parser = ProxRNN.add_model_specific_args(parser)
-    # args = parser.parse_args()
-    # for k, v in vars(args).items():
-    #     print(f"{k}: {v}")
-    # model = ProxRNN(
-    #     input_size=768,
-    #     hidden_size=args.prox_hidden,
-    #     output_size=args.prox_output,
-    #     num_layers=args.prox_layers,
-    # )
-    # print(model)
-
-    # inp = torch.rand(4, 128, 768)
-    # gradient_check_batch(inp, model)
-    # gradient_check_word_time(inp, model)
-
-    from turngpt.turngpt_dm import TurnGPTDM
-
-    p = ArgumentParser()
-    p = TurnGPTDM.add_data_specific_args(p, datasets=["dailydialog"])
-    a = p.parse_args()
-    a.chunk_size = 128
-    for k, v in vars(a).items():
-        print(f"{k}: {v}")
-    dm = TurnGPTDM(a)
-    dm.prepare_data()
-    dm.setup("fit")
-    sp1_idx = dm.sp1_idx
-    sp2_idx = dm.sp2_idx
-    pad_idx = dm.pad_idx
-
-    ################################################################################
-    # Transformer
     parser = ArgumentParser()
     parser = ProxTransformer.add_model_specific_args(parser)
+    parser = AudioDM.add_data_specific_args(
+        parser,
+        datasets=["switchboard"],
+        f0=True,
+        rms=True,
+        waveform=True,
+        normalize_f0=True,
+        interpolate_f0=True,
+    )
     args = parser.parse_args()
     for k, v in vars(args).items():
         print(f"{k}: {v}")
+
+    dm = AudioDM(args)
+    dm.prepare_data()
+    dm.setup("fit")
+    loader = dm.val_dataloader()
+    batch = next(iter(loader))
+
+    args.prox_layers = 4
     model = ProxTransformer(
         input_size=768,
         hidden_size=args.prox_hidden,
-        horizon=args.prox_horizon,
         n_layer=args.prox_layers,
         n_head=args.prox_heads,
+        horizon=args.prox_horizon,
+        horizon_constants=args.prox_horizon_constants,
         resid_pdrop=args.prox_resid_pdrop,
         attn_pdrop=args.prox_attn_pdrop,
         chunk_size=args.prox_chunk_size,
     )
     print(model)
-    print(model.horizon)
 
     batch = next(iter(dm.val_dataloader()))
-    # for batch in dm.val_dataloader():
-    #     print(batch[0].shape, (batch[0] == pad_idx).sum())
+
+    x = torch.randn((4, 128, 768))
+    o = model(x, True)
+    print(o.keys())
+    print(o["logits"].shape)
+    if "attn_prox" in o:
+        print(o["attn_prox"].shape)
 
     input_ids = batch[0]
     labels = input_ids[:, 1:]
@@ -282,7 +316,3 @@ if __name__ == "__main__":
     prox_logits = model(torch.rand((*input_ids.shape, 768)))
     loss = model.loss_function(prox_logits, labels, sp1_idx, sp2_idx, pad_idx)
     print(loss)
-
-    # model.loss_function(prox_logits, inp[:, :-1], sp1_idx=dm.sp1_idx, sp2_idx=dm.sp2_idx, pad_)
-    # gradient_check_batch(inp, model)
-    # gradient_check_word_time(inp, model)

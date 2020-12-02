@@ -42,6 +42,7 @@ class AcousticDataset(Dataset):
         pad_idx=50256,
         f0=False,
         rms=False,
+        duration=False,
         waveform=False,
         post_silence=False,
         sr=8000,
@@ -61,6 +62,7 @@ class AcousticDataset(Dataset):
         # features
         self.f0 = f0
         self.rms = rms
+        self.duration = duration
         if rms:
             waveform = True
         self.normalize_f0 = normalize_f0
@@ -158,6 +160,9 @@ class AcousticDataset(Dataset):
             rms.append(_rms)
         return torch.stack(rms)
 
+    def extract_duration(self, starts, ends):
+        return 1 / (torch.tensor(ends) - torch.tensor(starts))
+
     def pad_to_chunk_size(self, ret):
         # if len(ret['input_ids']) != self.chunk_size:
         for k, v in ret.items():
@@ -222,6 +227,9 @@ class AcousticDataset(Dataset):
             assert len(ret["rms"]) == len(
                 input_ids
             ), f"rms not same length {ret['rms'].shape}, {input_ids.shape}"
+
+        if self.duration:
+            ret["duration"] = self.extract_duration(data["starts"], data["ends"])
 
         if self.post_silence:
             ps = self.get_post_silence(data["starts"], data["ends"])

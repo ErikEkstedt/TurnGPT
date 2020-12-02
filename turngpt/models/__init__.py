@@ -1,4 +1,47 @@
+import torch
 import torch.nn as nn
+
+
+def gradient_check_batch(inp, model, n_batch=1):
+    opt = torch.optim.SGD(model.parameters(), lr=1)
+    opt.zero_grad()
+    inp.requires_grad = True
+    if inp.grad is not None:
+        inp.grad.zero_()
+
+    # forward
+    z = model(inp.to(model.device))
+    z[n_batch].sum().backward()
+
+    # calc grad
+    x_grad = inp.grad.data.abs()
+    for i in range(inp.ndim - 1):
+        x_grad = x_grad.sum(dim=-1)
+
+    if x_grad.sum() == x_grad[n_batch]:
+        print("Gradient Batch Success!")
+    else:
+        print("Gradient Batch Failure!")
+
+
+def gradient_check_word_time(inp, model):
+    opt = torch.optim.SGD(model.parameters(), lr=1)
+    opt.zero_grad()
+    inp.requires_grad = True
+    if inp.grad is not None:
+        inp.grad.zero_()
+    N = inp.shape[1]
+    target = N // 2
+    z = model(inp.to(model.device))
+    z[:, target].sum().backward()
+    x_grad = inp.grad.data.abs().sum(dim=0)  # sum batches
+    x_grad = x_grad.sum(dim=-1)  # sum prosody feats
+    if inp.ndim == 4:
+        x_grad = x_grad.sum(dim=-1)  # sum T
+    if x_grad[target + 1 :].sum() == 0:
+        print("Gradient Step Success!")
+    else:
+        print("Gradient Step Failure!")
 
 
 class KQV(nn.Module):

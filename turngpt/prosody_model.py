@@ -8,10 +8,10 @@ import torchaudio.transforms as AT
 from turngpt.acoustic_model import SPFConv
 from turngpt.models.gpt_mini import Block, TransformerConfig
 from turngpt.models.proximity import ProxTransformer
+from turngpt.models import Attention1D
 
 from ttd.tokenizer_helpers import convert_ids_to_tokens
 from turngpt.turngpt_utils import get_speaker_shift_indices
-from turngpt.models import Attention1D
 
 
 class SPF(pl.LightningModule):
@@ -326,13 +326,13 @@ if __name__ == "__main__":
 
     # debug
     import matplotlib.pyplot as plt
-
     from turngpt.acousticDM import AudioDM
     from ttd.utils import get_run_dir
     from pytorch_lightning.loggers import TensorBoardLogger
     from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
     from os import environ
     from os.path import join
+    from ttd.tokenizer_helpers import convert_ids_to_tokens
 
     pl.seed_everything(1234)
 
@@ -344,7 +344,7 @@ if __name__ == "__main__":
     parser = SPF.add_model_specific_args(parser)
     parser = AudioDM.add_data_specific_args(
         parser,
-        datasets=["maptask"],
+        datasets=["switchboard"],
         f0=True,
         rms=True,
         waveform=True,
@@ -360,11 +360,11 @@ if __name__ == "__main__":
     loader = dm.val_dataloader()
     batch = next(iter(loader))
 
-    args.checkpoint = "TurnGPT/turngpt/runs/F0Model/version_1/checkpoints/epoch=15-val_loss=0.30830.ckpt"
-    args.hparams = "TurnGPT/turngpt/runs/F0Model/version_1/hparams.yaml"
-
     args.checkpoint = "TurnGPT/turngpt/runs/F0Model/f0ni_rms/checkpoints/epoch=39-val_loss=0.27173.ckpt"
     args.hparams = "TurnGPT/turngpt/runs/F0Model/f0ni_rms/hparams.yaml"
+
+    args.checkpoint = "TurnGPT/turngpt/runs/F0Model/version_6/checkpoints/epoch=9-val_loss=0.13950.ckpt"
+    args.hparams = "TurnGPT/turngpt/runs/F0Model/version_6/hparams.yaml"
 
     # args.acoustic_n_feats = 1
 
@@ -397,9 +397,7 @@ if __name__ == "__main__":
     # Checkpoint callback (early stopping)
 
     batch = next(iter(dm.val_dataloader()))
-
     b = model.shared_step(batch)
-
     with torch.no_grad():
         out = model(b["x"], output_attention=True)
     input_ids = batch["input_ids"]
@@ -410,25 +408,29 @@ if __name__ == "__main__":
     if "prox_attn" in out:
         print("attn_prox: ", out["prox_attn"].shape)
 
-    from ttd.tokenizer_helpers import convert_ids_to_tokens
-
     tokens = convert_ids_to_tokens(input_ids, dm.tokenizer)
+    sp_b, sp_idx = get_speaker_shift_indices(input_ids, model.sp1_idx, model.sp2_idx)
 
     bi = 0
     N = 12
 
-    print(out["prox_attn"][bi, :, N, : N + 2])
-
-    inp_tokens = tokens[bi, : N + 2]
-    fig, ax = plt.subplots(1, 1, figsize=(9, 6))
-    # for head in range(8):
-    #     ax.plot(out['prox_attn'][bi, head, N, :N+2])
-    ax.plot(out["prox_attn"][bi, :, N, : N + 2].sum(dim=0))
-    ax.vlines(N, 0, 2, color="r")
-    ax.set_xticks(torch.arange(len(inp_tokens)))
-    ax.set_xticklabels(inp_tokens, rotation=65, fontsize=10)
-    ax.set_xlim([0, len(inp_tokens)])
-    plt.pause(0.01)
+    fig, ax = plt.subplots(4, 1, figsize=(16, 6), sharex=True)
+    for bi, N in zip(sp_b, sp_idx):
+        for a in ax:
+            a.cla()
+        inp_tokens = tokens[bi]
+        for head in range(8):
+            ax[0].plot(out["prox_attn"][bi, -1, head, N])
+        ax[1].plot(out["prox_attn"][bi, -1, :, N].sum(dim=0))
+        ax[2].plot(out["feat_attn"][bi, :, 0])
+        ax[3].plot(torch.sigmoid(out["logits"][bi]))
+        ax[-1].vlines(N, 0, 2, color="r")
+        ax[-1].set_xticks(torch.arange(len(inp_tokens)))
+        ax[-1].set_xticklabels(inp_tokens, rotation=65, fontsize=10)
+        ax[-1].set_xlim([0, len(inp_tokens)])
+        plt.tight_layout()
+        plt.pause(0.01)
+        input()
 
     for b in range(input_ids.shape[0]):
         fig, ax = plot_prox(
