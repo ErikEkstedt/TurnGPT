@@ -240,13 +240,136 @@ class ProxTransformer(pl.LightningModule):
         )
 
         # Model
-        parser.add_argument("--prox_hidden", default=128, type=int)
+        parser.add_argument("--prox_input_size", default=64, type=int)
+        parser.add_argument("--prox_hidden", default=64, type=int)
         parser.add_argument("--prox_layers", default=1, type=int)
-        parser.add_argument("--prox_heads", default=8, type=int)
+        parser.add_argument("--prox_heads", default=4, type=int)
         parser.add_argument("--prox_resid_pdrop", default=0.1, type=float)
         parser.add_argument("--prox_attn_pdrop", default=0.1, type=float)
         parser.add_argument("--prox_dropout", default=0.1, type=float)
         parser.add_argument("--prox_chunk_size", default=128, type=int)
+        parser.add_argument(
+            "--prox_horizon",
+            nargs="*",
+            type=int,
+            default=[1],
+        )
+        parser.add_argument(
+            "--prox_horizon_constants",
+            nargs="*",
+            type=int,
+            default=[1],
+        )
+        return parser
+
+
+class ProxRNN(pl.LightningModule):
+    def __init__(
+        self,
+        input_size,
+        hidden_size=256,
+        horizon=[1, 3],
+        n_layer=1,
+        dropout=0.1,
+        horizon_constants=[1, 1],
+    ):
+        super().__init__()
+        if isinstance(horizon, int):
+            horizon = [horizon]
+        self.horizon = horizon
+        self.output_size = len(self.horizon)
+        self.input_size = input_size
+        self.horizon_constants = horizon_constants
+        assert len(horizon) == len(
+            horizon_constants
+        ), "horizon and horizon constant must be of same length!"
+
+        # transformer
+        self.dropout = nn.Dropout(dropout)
+
+        self.rnn = nn.LSTM(input_size, hidden_size, num_layers=n_layer, dropout=dropout)
+
+        # head
+        self.ln_f = nn.LayerNorm(hidden_size)
+        self.head = nn.Linear(hidden_size, self.output_size, bias=True)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear)):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def forward(self, x, output_attention=False):
+        x, h = self.rnn(x)
+        x = self.head(self.ln_f(x))
+        out = {"logits": x}
+        return out
+
+    def create_label(self, labels, sp1_idx, sp2_idx):
+        proximity_labels = labels == sp1_idx
+        if sp1_idx != sp2_idx:
+            proximity_labels += labels == sp2_idx
+
+        labs = []
+        for tmp_horizon in self.horizon:
+            if tmp_horizon > 1:
+                tmp_lab = proximity_labels.unfold(
+                    dimension=1, step=1, size=tmp_horizon
+                ).sum(dim=-1)
+                tmp_lab = (tmp_lab > 0).long()
+                labs.append(tmp_lab.float())
+            elif tmp_horizon == 1:
+                labs.append(proximity_labels.float())
+        return labs
+
+    def loss_function(self, logits, labels, sp1_idx, sp2_idx=None, pad_idx=None):
+        """
+        Labels are token indices shifted to the left.
+        Create onehot-vector representing turn-shifts in label.
+        Unfold the tensor to look ahead N tokens.
+        Sum the onehot values in the unfolded window dim and check if any 1s are present.
+        A zero value in the labels indicates no proximity of turn-shift.
+
+        :logits:        torch.Tensor (B, N, 2)
+        :labels:        torch.Tensor (B, N)
+        :N:             int, n_tokens of horizon
+        :sp1_idx:       int, speaker 1 token index
+        :sp2_idx:       int, speaker 2 token index
+        """
+        labs = self.create_label(labels, sp1_idx, sp2_idx)
+        losses = {}
+        loss = 0
+        for head, (horizon, label) in enumerate(zip(self.horizon, labs)):
+            if pad_idx is not None:
+                lab = label[label != pad_idx]
+                pred = logits[:, : label.shape[1], head][label != pad_idx]
+                tmp_loss = F.binary_cross_entropy_with_logits(pred, lab.float())
+            else:
+                tmp_loss = F.binary_cross_entropy_with_logits(
+                    logits[:, : label.shape[1], head], label
+                )
+            loss += self.horizon_constants[head] * tmp_loss
+            losses[f"horizon_{horizon}"] = tmp_loss.detach().item()
+        losses["loss"] = loss
+        return losses
+
+    @staticmethod
+    def add_model_specific_args(parent_parser):
+        """ Specify the hyperparams for this LightningModule """
+        parser = ArgumentParser(
+            parents=[parent_parser], conflict_handler="resolve", add_help=False
+        )
+
+        # Model
+        parser.add_argument("--prox_input_size", default=64, type=int)
+        parser.add_argument("--prox_hidden", default=64, type=int)
+        parser.add_argument("--prox_layers", default=1, type=int)
+        parser.add_argument("--prox_dropout", default=0.1, type=float)
         parser.add_argument(
             "--prox_horizon",
             nargs="*",
