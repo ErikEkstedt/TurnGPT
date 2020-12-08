@@ -3,6 +3,7 @@ from argparse import ArgumentParser
 import torch
 import torch.nn as nn
 import torchaudio.transforms as AT
+import torchaudio.functional as AF
 
 from turngpt.models.encoders import SPFConv
 from turngpt.models import Attention1D
@@ -42,17 +43,30 @@ def plot_prox(
     return fig, ax
 
 
+"""
+
+last 1-second window of acoustic domain.
+
+Using a hop-size of 10ms a second of audio becomes 100 frames of information.
+
+What information do we care about?
+
+- f0: intonation
+- rms/energy: intensity
+"""
+
+
 class ProsodyEncoder(nn.Module):
     def __init__(
         self,
         frames=100,
         n_feats=2,
-        hidden=32,
+        hidden=64,
         layers=3,
         kernel=3,
         first_stride=2,
-        output_size=128,
-        n_head=8,
+        output_size=64,
+        n_head=1,
     ):
         super().__init__()
         self.hidden = hidden
@@ -115,9 +129,7 @@ class ProsodyEncoder(nn.Module):
         return parser
 
 
-if __name__ == "__main__":
-
-    # debug
+def main():
     import matplotlib.pyplot as plt
     from turngpt.acousticDM import AudioDM
     from ttd.tokenizer_helpers import convert_ids_to_tokens
@@ -125,7 +137,7 @@ if __name__ == "__main__":
     from turngpt.models import gradient_check_batch, gradient_check_word_time
 
     parser = ArgumentParser()
-    parser = ProsodyEncoder.add_model_specific_args(parser)
+    # parser = ProsodyEncoder.add_model_specific_args(parser)
     parser = AudioDM.add_data_specific_args(
         parser,
         datasets=["switchboard"],
@@ -134,6 +146,7 @@ if __name__ == "__main__":
         waveform=True,
         normalize_f0=True,
         interpolate_f0=True,
+        log_rms=True,
     )
     args = parser.parse_args()
     for k, v in vars(args).items():
@@ -157,6 +170,7 @@ if __name__ == "__main__":
     )
 
     batch = next(iter(dm.val_dataloader()))
+
     x = torch.stack((batch["f0"], batch["rms"]), dim=-1)
     o = enc(x, output_attention=True)
     for k, v in o.items():
@@ -166,4 +180,44 @@ if __name__ == "__main__":
     gradient_check_word_time(x, enc)
 
     fig, ax = enc.plot_attention(o["attn_pros"][0])
+    plt.show()
+
+
+if __name__ == "__main__":
+
+    import matplotlib.pyplot as plt
+    import torch
+    import torch.nn.functional as F
+
+    torch.manual_seed(0)
+
+    def coeff(order=2, width=5):
+        z = torch.arange(-(width - 1) / 2, (width + 1) / 2).reshape(-1, 1)
+        J = torch.cat([torch.pow(z, n) for n in range(order + 1)], 1)
+        JTJ = torch.matmul(J.t(), J)
+        iJTJ = torch.inverse(JTJ)
+        C = torch.matmul(iJTJ, J.t())
+        return C
+
+    def savgol(data, order=2, width=5, h=2):
+        savgolcoeff = coeff(order, width)
+        c = savgolcoeff[0, :]
+        pad_length = h * (width - 1) // 2
+        half_window = pad_length
+        data_pad = F.pad(data, (pad_length, pad_length), "constant", 0)
+        data_len = len(data)
+        data_pad_len = len(data_pad)
+        new_data = torch.zeros(data_len)
+        for i in range(pad_length, data_pad_len - pad_length):
+            data_window = data_pad[i - half_window : i + half_window + 1]
+            data_smooth = data_window[[h * n for n in range(width)]]
+            new_data[i - pad_length] = torch.sum(torch.mul(data_smooth, c))
+        return new_data
+
+    s = torch.rand(150)
+    d = AF.compute_deltas(s)
+    plt.plot(s.numpy(), "b")
+    snew3 = savgol(s, 3, 13, 1)
+    plt.plot(snew3.numpy(), "y")
+    plt.plot(d, "r")
     plt.show()

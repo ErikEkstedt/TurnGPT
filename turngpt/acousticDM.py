@@ -3,14 +3,15 @@ from os.path import join, basename, exists, split
 from os import makedirs, listdir
 from glob import glob
 from tqdm import tqdm
+import math
 import time
 import librosa
 
 import torch
+import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torchaudio
 import torchaudio.transforms as AT
-
 import pytorch_lightning as pl
 
 from ttd.basebuilder import create_builders, add_builder_specific_args
@@ -23,14 +24,79 @@ from ttd.tokenizer import (
 from turngpt.F0 import F0, f0_z_normalize, interpolate_forward, F0_swipe
 
 
-def get_f0_path(root, sr, hop_time):
-    f0_path = join(root, "f0")
-    f0_path += f"_sr-{sr}_hop-{hop_time}"
-    return f0_path
+# def get_f0_path(root, sr, hop_time):
+#     f0_path = join(root, "f0")
+#     f0_path += f"_sr-{sr}_hop-{hop_time}"
+#     return f0_path
+
+# This is defined in basebuilder and is a temporary hack
+def get_f0_path(root, sr, hop_time, f0_min, f0_max, f0_threshold, vad_mask):
+    fpath = f"F0_sr-{sr}_ht-{hop_time}_fmin-{f0_min}_fmax-{f0_max}_thr-{f0_threshold}_mask-{vad_mask}"
+    return join(root, fpath)
 
 
 def get_session_name(name):
     return name.replace(".json", "").split("_#")[0]
+
+
+class Gaussian1D(nn.Module):
+    """
+    Inspiration:
+        https://discuss.pytorch.org/t/is-there-anyway-to-do-gaussian-filtering-for-an-image-2d-3d-in-pytorch/12351/2
+    """
+
+    def __init__(self, channels=1, kernel_size=5, sigma=3):
+        super().__init__()
+        self.channels = channels
+        self.kernel_size = kernel_size
+        self.sigma = sigma
+
+        self.gaussian_filter = self._gaussian_kernel(
+            self.kernel_size, self.sigma, self.channels
+        )
+
+    def _gaussian_kernel(self, kernel_size=3, sigma=2, channels=1):
+        """
+        From:
+            https://discuss.pytorch.org/t/is-there-anyway-to-do-gaussian-filtering-for-an-image-2d-3d-in-pytorch/12351/3
+        """
+
+        # Create a x, y coordinate grid of shape (kernel_size, kernel_size, 2)
+        x_coord = torch.arange(kernel_size).unsqueeze(-1)
+        mean = (kernel_size - 1) / 2.0
+        variance = sigma ** 2.0
+
+        # Calculate the 2-dimensional gaussian kernel which is
+        # the product of two gaussian distributions for two different
+        # variables (in this case called x and y)
+        gaussian_kernel = (1.0 / (2.0 * math.pi * variance)) * torch.exp(
+            -torch.sum((x_coord - mean) ** 2.0, dim=-1) / (2 * variance)
+        )
+
+        # Make sure sum of values in gaussian kernel equals 1.
+        gaussian_kernel = gaussian_kernel / torch.sum(gaussian_kernel)
+
+        # reshape for nn.Conv1d
+        gaussian_kernel = gaussian_kernel.view(1, 1, kernel_size)
+        # gaussian_kernel = gaussian_kernel.repeat(channels, 1, 1, 1)
+        gaussian_kernel = gaussian_kernel.repeat(channels, 1, 1)
+
+        gaussian_filter = nn.Conv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=kernel_size,
+            groups=channels,
+            bias=False,
+            padding=kernel_size // 2,
+            padding_mode="reflect",
+        )
+
+        gaussian_filter.weight.data = gaussian_kernel
+        gaussian_filter.weight.requires_grad = False
+        return gaussian_filter
+
+    def forward(self, x):
+        return self.gaussian_filter(x)
 
 
 class AcousticDataset(Dataset):
@@ -40,18 +106,23 @@ class AcousticDataset(Dataset):
         sp1_idx=50257,
         sp2_idx=50258,
         pad_idx=50256,
-        f0=False,
-        rms=False,
-        duration=False,
         waveform=False,
-        post_silence=False,
+        rms=False,
+        log_rms=False,
+        duration=False,
+        pre_silence=False,
+        f0=False,
+        f0_min=60,
+        f0_max=300,
+        f0_threshold=0.3,
+        f0_vad_mask=True,
+        f0_normalize=False,
+        f0_interpolate=False,
+        f0_smooth=False,
         sr=8000,
         hop_time=0.01,
         word_audio_segment_time=1.0,
         chunk_size=128,
-        normalize_f0=False,
-        interpolate_f0=False,
-        log_rms=False,
     ):
         self.filepaths = filepaths
         self.sp1_idx = sp1_idx
@@ -60,16 +131,24 @@ class AcousticDataset(Dataset):
         self.chunk_size = chunk_size
 
         # features
-        self.f0 = f0
         self.rms = rms
         self.duration = duration
         if rms:
             waveform = True
-        self.normalize_f0 = normalize_f0
-        self.interpolate_f0 = interpolate_f0
         self.log_rms = log_rms
         self.waveform = waveform
-        self.post_silence = post_silence
+        self.pre_silence = pre_silence
+
+        self.f0 = f0
+        self.f0_normalize = f0_normalize
+        self.f0_interpolate = f0_interpolate
+        self.f0_min = f0_min
+        self.f0_max = f0_max
+        self.f0_threshold = f0_threshold
+        self.f0_vad_mask = f0_vad_mask
+        self.f0_smooth = f0_smooth
+        if f0_smooth:
+            self.f0_smoother = Gaussian1D(kernel_size=5)
 
         # audio parameters
         self.sr = sr
@@ -83,25 +162,14 @@ class AcousticDataset(Dataset):
     def __len__(self):
         return len(self.filepaths)
 
-    def get_post_silence(self, starts, ends):
-        post_silence = torch.stack((torch.tensor(starts), torch.tensor(ends)), dim=-1)
-        # post_silence = torch.tensor(starts)[1:] - torch.tensor(ends)[:-1]
-        # post_silence[post_silence < 0] = 0
-        return post_silence
-
-    def load_f0(self, root, name):
-        f0_root = get_f0_path(root, self.sr, self.hop_time)
-        f0_dict = torch.load(join(f0_root, name + ".pt"))
-        assert self.sr == f0_dict["sr"], "sr must match sr in f0"
-
-        hop_time = f0_dict["hop_time"]
-        assert (
-            self.hop_time == hop_time
-        ), f"hop_length must match hop_length in prosody, {hop_time}!={self.hop_time}"
-        return f0_dict
-
     def get_root(self, path):
         return split(split(path)[0])[0]
+
+    def get_pre_silence(self, starts, ends):
+        # pre_silence = torch.stack((torch.tensor(starts), torch.tensor(ends)), dim=-1)
+        pre_silence = torch.tensor(starts)[1:] - torch.tensor(ends)[:-1]
+        # pre_silence[pre_silence < 0] = 0
+        return pre_silence
 
     def extract_waveform_segments(self, input_ids, channel, starts, ends, audio):
         offset = int(min(starts) * self.sr)
@@ -127,6 +195,34 @@ class AcousticDataset(Dataset):
 
         return torch.stack(waveform_stack)
 
+    def extract_rms(self, waveform):
+        """
+        librosa rms
+        """
+        # waveform: B, n_samples
+        rms = []
+        for w in waveform:
+            _rms = torch.from_numpy(
+                librosa.feature.rms(w, hop_length=80, frame_length=160)[0, :-1]
+            )  # omit last frame for size
+            rms.append(_rms)
+        return torch.stack(rms)
+
+    def extract_duration(self, starts, ends):
+        return 1 / (torch.tensor(ends) - torch.tensor(starts))
+
+    def load_f0(self, root, name):
+        f0_root = get_f0_path(
+            root,
+            self.sr,
+            self.hop_time,
+            self.f0_min,
+            self.f0_max,
+            self.f0_threshold,
+            self.f0_vad_mask,
+        )
+        return torch.load(join(f0_root, name + ".pt"))
+
     def extract_f0_segments(self, input_ids, channel, ends, f0):
         frame_ends = torch.tensor(
             librosa.time_to_frames(ends, sr=self.sr, hop_length=self.hop_length)
@@ -150,21 +246,7 @@ class AcousticDataset(Dataset):
             f0_stack.append(tmp_f0)
         return torch.stack(f0_stack)
 
-    def extract_rms(self, waveform):
-        # waveform: B, n_samples
-        rms = []
-        for w in waveform:
-            _rms = torch.from_numpy(
-                librosa.feature.rms(w, hop_length=80, frame_length=160)[0, :-1]
-            )  # omit last frame for size
-            rms.append(_rms)
-        return torch.stack(rms)
-
-    def extract_duration(self, starts, ends):
-        return 1 / (torch.tensor(ends) - torch.tensor(starts))
-
     def pad_to_chunk_size(self, ret):
-        # if len(ret['input_ids']) != self.chunk_size:
         for k, v in ret.items():
             diff = self.chunk_size - len(v)
             if diff > 0:
@@ -199,13 +281,18 @@ class AcousticDataset(Dataset):
             f0_dict = self.load_f0(root, name)
             f0_dict["voiced"] = f0_dict["f0"] > 0
 
-            if self.normalize_f0:
+            if self.f0_normalize:
                 f0_dict["f0"] = f0_z_normalize(
                     f0_dict["f0"], mean=f0_dict["mean"], std=f0_dict["std"]
                 )
 
-            if self.interpolate_f0:
+            if self.f0_interpolate:
                 f0_dict["f0"] = interpolate_forward(f0_dict["f0"], f0_dict["voiced"])
+
+            if self.f0_smooth:
+                f0_dict["f0"] = self.f0_smoother(f0_dict["f0"].unsqueeze(-2)).squeeze(
+                    -2
+                )
 
             try:
                 f0 = self.extract_f0_segments(
@@ -231,12 +318,12 @@ class AcousticDataset(Dataset):
         if self.duration:
             ret["duration"] = self.extract_duration(data["starts"], data["ends"])
 
-        if self.post_silence:
-            ps = self.get_post_silence(data["starts"], data["ends"])
+        if self.pre_silence:
+            ps = self.get_pre_silence(data["starts"], data["ends"])
             assert len(ps) == len(
                 input_ids
-            ), f"post-silence not same length {ps.shape}, {input_ids.shape}"
-            ret["post_silence"] = ps
+            ), f"pre-silence not same length {ps.shape}, {input_ids.shape}"
+            ret["pre_silence"] = ps
 
         if self.chunk_size > 0:
             ret = self.pad_to_chunk_size(ret)
@@ -267,21 +354,28 @@ class AudioDM(pl.LightningDataModule):
         self.pad_idx = self.tokenizer.pad_token_id
         self.chunk_size = hparams["chunk_size"]
 
-        # Features
-        self.waveform = hparams["waveform"]
-        self.f0 = hparams["f0"]
-        self.rms = hparams["rms"]
-        self.log_rms = hparams["log_rms"]
-        self.interpolate_f0 = hparams["interpolate_f0"]
-        self.normalize_f0 = hparams["normalize_f0"]
-
         # audio
         self.sr = hparams["sample_rate"]
         self.hop_time = hparams["hop_time"]
         self.hop_length = int(self.sr * self.hop_time)
         self.word_audio_segment_time = hparams["word_audio_segment_time"]
-        self.post_silence = hparams["post_silence"]
+        self.pre_silence = hparams["pre_silence"]
         self.word_window_size = int(self.sr * self.word_audio_segment_time)
+
+        # Features
+        self.waveform = hparams["waveform"]
+        self.rms = hparams["rms"]
+        self.log_rms = hparams["log_rms"]
+        self.duration = hparams["duration"]
+
+        self.f0 = hparams["f0"]
+        self.f0_min = hparams["f0_min"]
+        self.f0_max = hparams["f0_max"]
+        self.f0_threshold = hparams["f0_threshold"]
+        self.f0_vad_mask = hparams["f0_vad_mask"]
+        self.f0_interpolate = hparams["f0_interpolate"]
+        self.f0_normalize = hparams["f0_normalize"]
+        self.f0_smooth = hparams["f0_smooth"]
 
         # Training
         self.batch_size = hparams["batch_size"]
@@ -289,38 +383,6 @@ class AudioDM(pl.LightningDataModule):
 
         # builder
         self.builders = create_builders(hparams)
-
-    def preprocess_f0(self, builder, tok_path):
-        f0_path = get_f0_path(builder.root, self.sr, self.hop_time)
-
-        if not exists(f0_path) or len(listdir(f0_path)) < 10:
-            makedirs(f0_path, exist_ok=True)
-            _F0 = F0(sr=self.sr, hop_time=self.hop_time)
-
-            for text_data_path in tqdm(
-                glob(join(tok_path, "*.json")),
-                desc=f"F0 {builder.NAME}",
-            ):
-                text_data = read_json(text_data_path)
-                name = basename(text_data_path).replace(".json", "")
-                audio_path = builder.get_audio_path(name)
-
-                # load audio
-                waveform, tmp_sr = torchaudio.load(builder.get_audio_path(name))
-                if tmp_sr != self.sr:
-                    resampler = AT.Resample(orig_freq=tmp_sr, new_freq=self.sr)
-                    waveform = resampler(waveform)
-
-                f0_dict = _F0(waveform)  # f0, mean, std
-                f0_dict["sr"] = self.sr
-                f0_dict["hop_time"] = self.hop_time
-
-                tmp_f0_path = join(f0_path, name + ".pt")
-                torch.save(f0_dict, tmp_f0_path)
-
-                # add/change paths
-                text_data["audio"] = audio_path
-                write_json(text_data, text_data_path)
 
     def prepare_chunked_waveform(self, builder, chunked_path):
         """
@@ -370,10 +432,15 @@ class AudioDM(pl.LightningDataModule):
             )
 
             # preprocess F0 for each audio file
-            # savedir:
-            #   builder.root/f0-{self.sr}_hop-{self.hop_time}_win-{self.window_time}
             if self.f0:
-                self.preprocess_f0(builder, tok_path)
+                f0_path = builder.prepare_f0(
+                    sr=self.sr,
+                    hop_time=self.hop_time,
+                    f0_min=self.f0_min,
+                    f0_max=self.f0_max,
+                    f0_threshold=self.f0_threshold,
+                    vad_mask=self.f0_vad_mask,
+                )
 
             # prepare chunks
             chunked_path = builder.prepare_chunked_tokens(
@@ -402,12 +469,16 @@ class AudioDM(pl.LightningDataModule):
             word_audio_segment_time=self.word_audio_segment_time,
             chunk_size=self.hparams["chunk_size"],
             waveform=self.waveform,
-            f0=self.f0,
             rms=self.rms,
             log_rms=self.log_rms,
-            normalize_f0=self.normalize_f0,
-            interpolate_f0=self.interpolate_f0,
-            post_silence=self.post_silence,
+            pre_silence=self.pre_silence,
+            duration=self.duration,
+            f0=self.f0,
+            f0_normalize=self.f0_normalize,
+            f0_interpolate=self.f0_interpolate,
+            f0_smooth=self.f0_smooth,
+            f0_threshold=self.f0_threshold,
+            f0_vad_mask=self.f0_vad_mask,
         )
 
     def setup(self, stage="fit"):
@@ -465,16 +536,33 @@ class AudioDM(pl.LightningDataModule):
         )
 
     @staticmethod
+    def add_f0_args(
+        parent_parser, f0=False, normalize_f0=False, interpolate_f0=False, f0_mask=True
+    ):
+        parser = ArgumentParser(parents=[parent_parser], add_help=False)
+        parser.add_argument("--f0", action="store_true", default=f0)
+        parser.add_argument("--f0_normalize", action="store_true", default=normalize_f0)
+        parser.add_argument(
+            "--f0_interpolate", action="store_true", default=interpolate_f0
+        )
+        parser.add_argument("--f0_smooth", action="store_true", default=interpolate_f0)
+        parser.add_argument("--f0_min", type=int, default=60)
+        parser.add_argument("--f0_max", type=int, default=300)
+        parser.add_argument("--f0_threshold", type=float, default=0.3)
+        parser.add_argument("--f0_vad_mask", action="store_true", default=f0_mask)
+        return parser
+
+    @staticmethod
     def add_data_specific_args(
         parent_parser,
         datasets=["maptask"],
         waveform=False,
-        f0=False,
         rms=False,
         log_rms=False,
+        pre_silence=False,
+        f0=False,
         normalize_f0=False,
         interpolate_f0=False,
-        post_silence=False,
     ):
         """ Specify the hyperparams for this LightningModule """
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
@@ -496,14 +584,11 @@ class AudioDM(pl.LightningDataModule):
 
         # Features
         parser.add_argument("--waveform", action="store_true", default=waveform)
-        parser.add_argument("--f0", action="store_true", default=f0)
         parser.add_argument("--rms", action="store_true", default=rms)
         parser.add_argument("--log_rms", action="store_true", default=log_rms)
-        parser.add_argument("--normalize_f0", action="store_true", default=normalize_f0)
-        parser.add_argument(
-            "--interpolate_f0", action="store_true", default=interpolate_f0
-        )
-        parser.add_argument("--post_silence", action="store_true", default=post_silence)
+        parser.add_argument("--duration", action="store_true", default=pre_silence)
+        parser.add_argument("--pre_silence", action="store_true", default=pre_silence)
+        parser = AudioDM.add_f0_args(parser, f0, normalize_f0, interpolate_f0)
 
         # Audio params
         parser.add_argument("--word_audio_segment_time", type=float, default=1)
@@ -527,53 +612,36 @@ class AudioDM(pl.LightningDataModule):
 
 def main():
     parser = ArgumentParser()
-    parser = AcousticGPTDM.add_data_specific_args(
-        parser, datasets=["maptask"], prosody=True, post_silence=True
+    parser = AudioDM.add_data_specific_args(
+        parser,
+        datasets=["maptask"],
+        # datasets=["switchboard"],
+        f0=True,
+        waveform=True,
+        normalize_f0=True,
+        interpolate_f0=True,
+        rms=True,
     )
     args = parser.parse_args()
-    args.hop_time = 0.01
-    args.window_time = 0.1
-    args.window_time = 0.1
-    # args.prosody = True
-    # args.num_workers = 0
-    dm = AcousticGPTDM(args)
+    for k, v in vars(args).items():
+        print(f"{k}: {v}")
+    dm = AudioDM(args)
     dm.prepare_data()
     dm.setup("fit")
+
+    print("Check dataloaders are functional")
+    loader = dm.train_dataloader()
+    for batch in tqdm(loader, desc="train"):
+        pass
+
+    loader = dm.val_dataloader()
+    for batch in tqdm(loader, desc="val"):
+        pass
+
     dm.setup("test")
-
-    batch = next(iter(dm.val_dataloader()))
-    print(len(batch))
-
-    if False:
-        dset = AcousticDataset(
-            dm.val_filepaths,
-            sr=8000,
-            word_audio_segment_time=1.0,
-            hop_length=400,
-            sp1_idx=50257,
-            sp2_idx=50258,
-            prosody=True,
-        )
-
-        input_ids, speaker_ids, audio, prosody = dset[0]
-
-        for d in dset:
-            input_ids, speaker_ids, audio, prosody = d
-            print("input_ids: ", tuple(input_ids.shape))
-            print("prosody: ", tuple(prosody.shape))
-            print("audio: ", tuple(audio.shape))
-
-        import matplotlib.pyplot as plt
-
-        fig, ax = plt.subplots(1, 1)
-        for i in range(prosody.shape[0]):
-            ax.cla()
-            ax.plot(prosody[i, :, 0], label="pitch")
-            ax.plot(prosody[i, :, 1], label="voiced")
-            ax.plot(prosody[i, :, 2], label="zcr")
-            ax.plot(prosody[i, :, 3], label="rms")
-            plt.legend()
-            plt.pause(0.5)
+    loader = dm.test_dataloader()
+    for batch in tqdm(loader, desc="test"):
+        pass
 
 
 if __name__ == "__main__":
@@ -592,103 +660,25 @@ if __name__ == "__main__":
         waveform=True,
         normalize_f0=True,
         interpolate_f0=True,
+        rms=True,
     )
     args = parser.parse_args()
     for k, v in vars(args).items():
         print(f"{k}: {v}")
-    args.batch_size = 16
+    args.duration = True
     dm = AudioDM(args)
     dm.prepare_data()
     dm.setup("fit")
-    loader = dm.train_dataloader()
 
-    for batch in tqdm(loader, desc="train"):
-        input_ids = batch["input_ids"]
-        speaker_ids = batch["speaker_ids"]
-        # print("input_ids: ", tuple(input_ids.shape))
-        # print("speaker_ids: ", tuple(speaker_ids.shape))
-        # print("-" * 30)
+    d = dm.train_dset[0]
+    print(d.keys())
 
-    # loader = dm.val_dataloader()
-    # for batch in tqdm(loader, desc="val"):
-    #     input_ids = batch["input_ids"]
-    #     speaker_ids = batch["speaker_ids"]
-    #     print("input_ids: ", tuple(input_ids.shape))
-    #     print("speaker_ids: ", tuple(speaker_ids.shape))
-    #     print("-" * 30)
-
-    # dm.setup("test")
-    # loader = dm.test_dataloader()
-    # for batch in tqdm(loader, desc="test"):
-    #     input_ids = batch["input_ids"]
-    #     speaker_ids = batch["speaker_ids"]
-    #     print("input_ids: ", tuple(input_ids.shape))
-    #     print("speaker_ids: ", tuple(speaker_ids.shape))
-    #     print("-" * 30)
-
-    if False:
-        batch = next(iter(loader))
-        b = 1
-        input_ids = batch["input_ids"][0]
-        speaker_ids = batch["speaker_ids"][0]
-        print("input_ids: ", tuple(input_ids.shape))
-        print("speaker_ids: ", tuple(speaker_ids.shape))
-        if "waveform" in batch:
-            waveform = batch["waveform"][0]
-            print("waveform: ", tuple(waveform.shape))
-        if "f0" in batch:
-            f0 = batch["f0"][0]
-            print("f0: ", tuple(f0.shape))
-
-        fig, ax = plt.subplots(2, 1, figsize=(9, 6))
-        for ids, wave, _f0 in zip(input_ids, waveform, f0):
-            tok = convert_ids_to_tokens(ids, dm.tokenizer)
-            # ff0 = F0_swipe(wave, hop_length=80, sr=8000)
-            print(tok[0])
-            sd.play(wave, samplerate=dm.sr)
-            for a in ax:
-                a.cla()
-            ax[0].plot(wave)
-            ax[0].set_ylim([-0.5, 0.5])
-            ax[1].plot(_f0)
-            # ax[1].plot(ff0)
-            ax[1].set_ylim([-2.0, 2.0])
-            # ax[1].set_ylim([0, 250.0])
-            plt.pause(0.01)
-            input()
-            print()
-
-        import matplotlib.pyplot as plt
-
-        fig, ax = plt.subplots(1, 1, figsize=(9, 6))
-        for batch in tqdm(loader):
-            # input_ids, speaker_ids, audio, prosody = batch
-            input_ids, speaker_ids, audio, pros, ps = batch
-            print("input_ids: ", tuple(input_ids.shape))
-            print("speaker_ids: ", tuple(speaker_ids.shape))
-            print("audio: ", tuple(audio.shape))
-            print("pros: ", tuple(pros.shape))
-            input()
-            # print("input_ids: ", tuple(input_ids.shape))
-            # if isinstance(prosody, torch.Tensor):
-            #     print("prosody: ", tuple(prosody.shape))
-            # print("audio: ", tuple(audio.shape))
-
-            for p in pros:
-                for tp in p:
-                    ax.cla()
-                    ax.plot(tp[:, 0].unsqueeze(1), label="pitch")
-                    # ax.plot(tp[:, 1].unsqueeze(1), label="voiced")
-                    # ax.plot(tp[:, 3].unsqueeze(1), label="zcr")
-                    ax.plot(tp[:, 3].unsqueeze(1), label="rms")
-                    ax.legend()
-                    plt.pause(0.001)
-                    input()
-
-        p = pros[0]  # B, T, 1
-        p = pros[0, :, :, 0]  # B, T
-        v = pros[0, :, :, 1]  # B, T
-
-        from ttd.utils import find_island_idx_len
-
-        idx, dur, val = find_island_idx_len(v[0])
+    tokens = convert_ids_to_tokens(d["input_ids"], dm.tokenizer)
+    fig, ax = plt.subplots(1, 1)
+    for f, t, t1 in zip(d["f0"][:-1], tokens[:-1], tokens[1:]):
+        ax.cla()
+        ax.set_title(t + " -> " + t1)
+        ax.set_ylim([-3, 3])
+        ax.plot(f)
+        plt.pause(0.01)
+        input()
