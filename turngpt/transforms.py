@@ -6,15 +6,8 @@ from turngpt.turngpt_utils import get_positive_and_negative_indices
 
 class ClassificationLabelTransform(object):
     def __init__(
-        self,
-        ngram=1,
-        ratio=1,
-        sp1_idx=50257,
-        sp2_idx=50258,
-        pad_idx=50256,
-        max_batch_size=256,
+        self, ratio=1, sp1_idx=50257, sp2_idx=50258, pad_idx=50256, max_batch_size=256
     ):
-        self.ngram = ngram
         self.ratio = ratio
         self.sp1_idx = sp1_idx
         self.sp2_idx = sp2_idx
