@@ -9,8 +9,14 @@ from os.path import join
 import pytorch_lightning as pl
 import matplotlib.pyplot as plt
 
+
 from turngpt.models import Attention1D
 from turngpt.transforms import ClassificationLabelTransform
+
+from matplotlib import use as mpl_use
+
+mpl_use("Agg")
+pl.seed_everything(1234)
 
 
 class SelfAttention(nn.Module):
