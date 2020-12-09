@@ -101,6 +101,23 @@ class ProsodyEncoder(nn.Module):
         ax.set_ylim([0, 1])
         return fig, ax
 
+    def training_step(self, batch, *args, **kwargs):
+        x, y = self.input_to_label(batch["f0"], batch["input_ids"])
+
+        y_pred = self(x)
+        loss = self.loss_function(y_pred, y)
+
+        self.log("loss", loss)
+        return {"loss": loss}
+
+    def validation_step(self, batch, *args, **kwargs):
+        x, y = self.input_to_label(batch["f0"], batch["input_ids"])
+
+        y_pred = self(x)
+        loss = self.loss_function(y_pred, y)
+        self.log("val_loss", loss)
+        return {"val_loss": loss}
+
     def forward(self, x, output_attention=False):
         ret = {}
         x = self.feature_encoder(x)
@@ -129,7 +146,7 @@ class ProsodyEncoder(nn.Module):
         return parser
 
 
-def main():
+if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from turngpt.acousticDM import AudioDM
     from ttd.tokenizer_helpers import convert_ids_to_tokens
@@ -180,44 +197,4 @@ def main():
     gradient_check_word_time(x, enc)
 
     fig, ax = enc.plot_attention(o["attn_pros"][0])
-    plt.show()
-
-
-if __name__ == "__main__":
-
-    import matplotlib.pyplot as plt
-    import torch
-    import torch.nn.functional as F
-
-    torch.manual_seed(0)
-
-    def coeff(order=2, width=5):
-        z = torch.arange(-(width - 1) / 2, (width + 1) / 2).reshape(-1, 1)
-        J = torch.cat([torch.pow(z, n) for n in range(order + 1)], 1)
-        JTJ = torch.matmul(J.t(), J)
-        iJTJ = torch.inverse(JTJ)
-        C = torch.matmul(iJTJ, J.t())
-        return C
-
-    def savgol(data, order=2, width=5, h=2):
-        savgolcoeff = coeff(order, width)
-        c = savgolcoeff[0, :]
-        pad_length = h * (width - 1) // 2
-        half_window = pad_length
-        data_pad = F.pad(data, (pad_length, pad_length), "constant", 0)
-        data_len = len(data)
-        data_pad_len = len(data_pad)
-        new_data = torch.zeros(data_len)
-        for i in range(pad_length, data_pad_len - pad_length):
-            data_window = data_pad[i - half_window : i + half_window + 1]
-            data_smooth = data_window[[h * n for n in range(width)]]
-            new_data[i - pad_length] = torch.sum(torch.mul(data_smooth, c))
-        return new_data
-
-    s = torch.rand(150)
-    d = AF.compute_deltas(s)
-    plt.plot(s.numpy(), "b")
-    snew3 = savgol(s, 3, 13, 1)
-    plt.plot(snew3.numpy(), "y")
-    plt.plot(d, "r")
     plt.show()

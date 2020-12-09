@@ -537,15 +537,20 @@ class AudioDM(pl.LightningDataModule):
 
     @staticmethod
     def add_f0_args(
-        parent_parser, f0=False, normalize_f0=False, interpolate_f0=False, f0_mask=True
+        parent_parser,
+        f0=False,
+        f0_normalize=False,
+        f0_interpolate=False,
+        f0_smooth=False,
+        f0_mask=True,
     ):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
         parser.add_argument("--f0", action="store_true", default=f0)
-        parser.add_argument("--f0_normalize", action="store_true", default=normalize_f0)
+        parser.add_argument("--f0_normalize", action="store_true", default=f0_normalize)
         parser.add_argument(
-            "--f0_interpolate", action="store_true", default=interpolate_f0
+            "--f0_interpolate", action="store_true", default=f0_interpolate
         )
-        parser.add_argument("--f0_smooth", action="store_true", default=interpolate_f0)
+        parser.add_argument("--f0_smooth", action="store_true", default=f0_smooth)
         parser.add_argument("--f0_min", type=int, default=60)
         parser.add_argument("--f0_max", type=int, default=300)
         parser.add_argument("--f0_threshold", type=float, default=0.3)
@@ -560,9 +565,12 @@ class AudioDM(pl.LightningDataModule):
         rms=False,
         log_rms=False,
         pre_silence=False,
+        duration=False,
         f0=False,
-        normalize_f0=False,
-        interpolate_f0=False,
+        f0_normalize=False,
+        f0_interpolate=False,
+        f0_smooth=False,
+        f0_mask=True,
     ):
         """ Specify the hyperparams for this LightningModule """
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
@@ -586,9 +594,16 @@ class AudioDM(pl.LightningDataModule):
         parser.add_argument("--waveform", action="store_true", default=waveform)
         parser.add_argument("--rms", action="store_true", default=rms)
         parser.add_argument("--log_rms", action="store_true", default=log_rms)
-        parser.add_argument("--duration", action="store_true", default=pre_silence)
+        parser.add_argument("--duration", action="store_true", default=duration)
         parser.add_argument("--pre_silence", action="store_true", default=pre_silence)
-        parser = AudioDM.add_f0_args(parser, f0, normalize_f0, interpolate_f0)
+        parser = AudioDM.add_f0_args(
+            parser,
+            f0=f0,
+            f0_normalize=f0_normalize,
+            f0_interpolate=f0_interpolate,
+            f0_smooth=f0_smooth,
+            f0_mask=f0_mask,
+        )
 
         # Audio params
         parser.add_argument("--word_audio_segment_time", type=float, default=1)
