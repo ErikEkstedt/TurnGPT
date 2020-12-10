@@ -356,8 +356,6 @@ def experiment(parser):
     """
     from turngpt.acousticDM import AudioDM
 
-    parser.add_argument("--early_stopping", action="store_true")
-    parser.add_argument("--patience", type=int, default=5)
     parser = ProsodyClassifier.add_model_specific_args(parser)
     parser = pl.Trainer.add_argparse_args(parser)
     parser = AudioDM.add_data_specific_args(
@@ -425,6 +423,7 @@ def experiment(parser):
             trainer.fit(model, datamodule=dm)
 
 
+################################################################################
 class QClassifier(pl.LightningModule):
     def __init__(
         self,
@@ -586,8 +585,6 @@ def experiment_Q(parser):
     """
     from turngpt.acousticDM import AudioDM
 
-    parser.add_argument("--early_stopping", action="store_true")
-    parser.add_argument("--patience", type=int, default=5)
     parser = QClassifier.add_model_specific_args(parser)
     parser = pl.Trainer.add_argparse_args(parser)
     parser = AudioDM.add_data_specific_args(
@@ -665,6 +662,7 @@ def experiment_Q(parser):
         trainer.test(test_dataloaders=dm.val_dataloader(), verbose=True)
 
 
+################################################################################
 class QRNNClassifier(pl.LightningModule):
     def __init__(
         self,
@@ -828,8 +826,6 @@ def experiment_QRNN(parser):
     """
     from turngpt.acousticDM import AudioDM
 
-    parser.add_argument("--early_stopping", action="store_true")
-    parser.add_argument("--patience", type=int, default=5)
     parser = QRNNClassifier.add_model_specific_args(parser)
     parser = pl.Trainer.add_argparse_args(parser)
     parser = AudioDM.add_data_specific_args(
@@ -911,6 +907,7 @@ def experiment_QRNN(parser):
         trainer.test(test_dataloaders=dm.val_dataloader(), verbose=True)
 
 
+################################################################################
 def logging(args, name="model"):
     from pytorch_lightning.loggers import TensorBoardLogger
     from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
@@ -970,6 +967,9 @@ if __name__ == "__main__":
     # y_pred = enc(x)
 
     parser = ArgumentParser()
+    parser.add_argument("--early_stopping", action="store_true")
+    parser.add_argument("--patience", type=int, default=5)
+
     parser.add_argument("--regular", action="store_true")
     parser.add_argument("--VQ", action="store_true")
     parser.add_argument("--VQRNN", action="store_true")
