@@ -92,6 +92,21 @@ class ConvEncoder(nn.Module):
         self.padding = 0
         self.activation = getattr(nn, activation)
 
+        if isinstance(self.first_stride, int):
+            self.first_stride = [1] * self.num_layers
+            self.first_stride[0] = first_stride
+        else:
+            assert (
+                len(self.first_stride) == num_layers
+            ), "provide as many strides as layers"
+
+        if isinstance(kernel_size, int):
+            self.kernel_size = [kernel_size] * self.num_layers
+        else:
+            assert (
+                len(kernel_size) == num_layers
+            ), "provide as many kernel_size as layers"
+
         if independent:
             self.groups = in_channels
             self.hidden = hidden
@@ -106,11 +121,11 @@ class ConvEncoder(nn.Module):
         return int(((input_size - kernel_size + 2 * padding) / stride) + 1)
 
     def calc_conv_out(self):
-        n = self.conv_output_size(
-            self.input_frames, self.kernel_size, self.padding, self.first_stride
-        )
-        for i in range(self.num_layers - 1):
-            n = self.conv_output_size(n, self.kernel_size, self.padding, 1)
+        n = self.input_frames
+        for i in range(0, self.num_layers):
+            n = self.conv_output_size(
+                n, self.kernel_size[i], self.padding, stride=self.first_stride[i]
+            )
         return n
 
     def _build_conv_layers(self):
@@ -118,8 +133,8 @@ class ConvEncoder(nn.Module):
             nn.Conv1d(
                 in_channels=self.in_channels,
                 out_channels=self.hidden,
-                kernel_size=self.kernel_size,
-                stride=self.first_stride,
+                kernel_size=self.kernel_size[0],
+                stride=self.first_stride[0],
                 padding=self.padding,
                 groups=self.groups,
             ),
@@ -130,7 +145,8 @@ class ConvEncoder(nn.Module):
                 nn.Conv1d(
                     in_channels=self.hidden,
                     out_channels=self.hidden,
-                    kernel_size=self.kernel_size,
+                    kernel_size=self.kernel_size[i],
+                    stride=self.first_stride[i],
                     padding=self.padding,
                     groups=self.groups,
                 ),
@@ -260,6 +276,7 @@ class ProsodyClassifier(pl.LightningModule):
         pad_idx=50258,
     ):
         super().__init__()
+        self.save_hyperparameters()
         self.conv_encoder = ConvEncoder(
             input_frames=in_frames,
             hidden=conv_hidden,
@@ -443,6 +460,7 @@ class QClassifier(pl.LightningModule):
         pad_idx=50258,
     ):
         super().__init__()
+        self.save_hyperparameters()
         self.conv_encoder = ConvEncoder(
             input_frames=in_frames,
             hidden=conv_hidden,
@@ -545,7 +563,10 @@ class QClassifier(pl.LightningModule):
         return {"val_loss": loss, "val_vq_loss": vq_loss}
 
     def test_step(self, batch, batch_idx):
-        metrics = self.validation_step(batch, batch_idx)
+        x, y, input_ids = self.shared_step(batch)
+        y_pred, vq_loss = self(x)
+        loss = self.loss_function(y_pred, y)
+        loss += vq_loss
         if batch_idx == 0:
             projection = self.code_projection()
             fig, ax = self.plot_codes(projection)
@@ -554,8 +575,8 @@ class QClassifier(pl.LightningModule):
             print("saved projection fig -> ", fig_path)
             plt.close()
         return {
-            "test_loss": metrics["val_loss"],
-            "test_vq_loss": metrics["val_vq_loss"],
+            "test_loss": loss,
+            "test_vq_loss": vq_loss,
         }
 
     @staticmethod
@@ -683,6 +704,7 @@ class QRNNClassifier(pl.LightningModule):
         pad_idx=50258,
     ):
         super().__init__()
+        self.save_hyperparameters()
         self.conv_encoder = ConvEncoder(
             input_frames=in_frames,
             hidden=conv_hidden,

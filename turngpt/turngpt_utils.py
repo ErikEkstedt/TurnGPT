@@ -36,34 +36,20 @@ def get_turns(input_ids, sp1_idx, sp2_idx):
 
 
 def get_positive_and_negative_indices(input_ids, sp1_idx, sp2_idx, pad_idx):
-    """
-    Finds positive and negative indices for turn-shifts.
-
-    * Positive turn-shifts are the indices prior to a <speaker1/2> token
-    * Negative turn-shifts are all other indices (except pad_tokens)
-
-    Returns:
-        turn_shift_indices:     tuple, (batch, inds) e.g.  input_ids[turn_shift_indices]
-        non_turn_shift_indices: tuple, (batch, inds) e.g.  input_ids[non_turn_shift_indices]
-    """
-    (ts_bs, ts_inds) = get_turn_shift_indices(input_ids, sp1_idx, sp2_idx)
-    bp, indp = torch.where(input_ids != pad_idx)  # all valid places
-
-    # TODO:
-    # Remove the speaker-id tokens from negatives?
-
+    (pos_bs, pos_inds) = get_turn_shift_indices(input_ids, sp1_idx, sp2_idx)
     neg_bs, neg_inds = [], []
-    for i in bp.unique():
-        neg_ind = indp[bp == i]  # valid indices (not pad) # [1:]  # omit 0
-        ts = ts_inds[ts_bs == i]  # turn-shifts in batch i
-        neg_ind[ts] = -1  # mark these
-        neg_ind = neg_ind[neg_ind != -1]
-        neg_bs.append(torch.ones_like(neg_ind) * i)
-        neg_inds.append(neg_ind)
-
-    neg_bs = torch.cat(neg_bs)
-    neg_inds = torch.cat(neg_inds)
-    return (ts_bs, ts_inds), (neg_bs, neg_inds)
+    for i in range(input_ids.shape[0]):
+        ts = pos_inds[pos_bs == i]  # turn-shifts in batch i
+        all_indices = torch.where(input_ids[i] != pad_idx)[0]
+        all_indices[ts] = -1  # mark the positives
+        tmp_negatives = all_indices[all_indices != -1]  # choose all 'not' positives
+        neg_bs.append(
+            torch.ones_like(tmp_negatives) * i
+        )  # create batch vector and append
+        neg_inds.append(tmp_negatives)  # append negative values
+    neg_bs = torch.cat(neg_bs)  # concat negative batch vectors
+    neg_inds = torch.cat(neg_inds)  # concat negative index vectors
+    return (pos_bs, pos_inds), (neg_bs, neg_inds)
 
 
 def find_turn_context(focus_index, turns, n_context):
