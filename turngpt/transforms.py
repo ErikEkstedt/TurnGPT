@@ -6,16 +6,23 @@ from turngpt.turngpt_utils import get_positive_and_negative_indices
 
 class ClassificationLabelTransform(object):
     def __init__(
-        self, ratio=1, sp1_idx=50257, sp2_idx=50258, pad_idx=50256, max_batch_size=256
+        self,
+        ratio=1,
+        sp1_idx=50257,
+        sp2_idx=50258,
+        pad_idx=50256,
+        max_batch_size=256,
+        unigram=True,
     ):
         self.ratio = ratio
         self.sp1_idx = sp1_idx
         self.sp2_idx = sp2_idx
         self.pad_idx = pad_idx
+        self.unigram = unigram
 
         self.max_batch_size = max_batch_size
 
-    def __call__(self, x, input_ids):
+    def _unigram(self, x, input_ids):
         pos, neg = get_positive_and_negative_indices(
             input_ids, self.sp1_idx, self.sp2_idx, self.pad_idx
         )
@@ -39,6 +46,21 @@ class ClassificationLabelTransform(object):
         y[:n_pos] = 1
         return x, y, inp
 
+    def onehot_speaker_shift(self, x, input_ids):
+        sp = input_ids == self.sp1_idx
+        sp += input_ids == self.sp2_idx
+        sp = torch.cat(
+            (sp[:, 1:], torch.zeros(sp.shape[0], 1).to(input_ids.device)), dim=-1
+        )
+        return x, sp, input_ids
+
+    def __call__(self, x, input_ids):
+
+        if self.unigram:
+            return self._unigram(x, input_ids)
+        else:
+            return self.onehot_speaker_shift(x, input_ids)
+
 
 if __name__ == "__main__":
 
@@ -54,10 +76,10 @@ if __name__ == "__main__":
         parser,
         datasets=["maptask"],
         f0=True,
-        rms=True,
         waveform=True,
-        normalize_f0=True,
-        interpolate_f0=True,
+        f0_normalize=True,
+        f0_interpolate=True,
+        rms=True,
         log_rms=True,
     )
     args = parser.parse_args()
@@ -72,8 +94,13 @@ if __name__ == "__main__":
     batch = next(iter(loader))
 
     batch_transform = ClassificationLabelTransform(
-        ratio=1.0, sp1_idx=dm.sp1_idx, sp2_idx=dm.sp2_idx, pad_idx=dm.pad_idx
+        ratio=1.0,
+        sp1_idx=dm.sp1_idx,
+        sp2_idx=dm.sp2_idx,
+        pad_idx=dm.pad_idx,
+        unigram=False,
     )
+
     input_ids = batch["input_ids"]
     x = torch.stack((batch["f0"], batch["rms"]), dim=-1)
     print("pros: ", x.shape)
