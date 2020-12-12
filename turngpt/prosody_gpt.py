@@ -295,42 +295,44 @@ def PGPTExperiment(parser):
     name = "PGPT"
     for n_code_dim in [300, 100, 60]:
         args.n_code_dim = n_code_dim
+        for n_layer in [1, 2]:
+            args.n_layer = n_layer
+            for n_head in [2, 4, 1]:
+                args.n_head = n_head
 
-        for n_head in [2, 4, 1]:
-            args.n_head = n_head
+                model = ProsodyGPT(
+                    n_codes=args.n_codes,
+                    n_code_dim=args.n_code_dim,
+                    n_layer=args.n_layer,
+                    n_head=args.n_head,
+                    n_tokens=args.n_tokens,
+                    n_token_dim=args.n_token_dim,
+                    prosody_frames=args.prosody_frames,
+                    prosody_in_channels=args.prosody_in_channels,
+                    prosody_conv_hidden=args.prosody_conv_hidden,
+                    prosody_kernel=args.prosody_kernel,
+                    prosody_stride=args.prosody_stride,
+                    prosody_activation=args.prosody_activation,
+                )
+                model.load_word_embeddings(EMB_PATH)
+                n_params = get_n_trainable_params(model)
+                # print(model)
+                print("n_code_dim: ", args.n_code_dim)
+                print("n_head: ", args.n_head)
+                print("n_layer: ", args.n_layer)
+                print("n_codes: ", args.n_codes)
+                print("parameters: ", n_params)
 
-            model = ProsodyGPT(
-                n_codes=args.n_codes,
-                n_code_dim=args.n_code_dim,
-                n_layer=args.n_layer,
-                n_head=args.n_head,
-                n_tokens=args.n_tokens,
-                n_token_dim=args.n_token_dim,
-                prosody_frames=args.prosody_frames,
-                prosody_in_channels=args.prosody_in_channels,
-                prosody_conv_hidden=args.prosody_conv_hidden,
-                prosody_kernel=args.prosody_kernel,
-                prosody_stride=args.prosody_stride,
-                prosody_activation=args.prosody_activation,
-            )
-            model.load_word_embeddings(EMB_PATH)
-            n_params = get_n_trainable_params(model)
-            # print(model)
-            print("n_code_dim: ", args.n_code_dim)
-            print("n_head: ", args.n_head)
-            print("n_codes: ", args.n_codes)
-            print("parameters: ", n_params)
+                logger, checkpoint_callback, callbacks = logging(args, name=name)
 
-            logger, checkpoint_callback, callbacks = logging(args, name=name)
-
-            trainer = pl.Trainer.from_argparse_args(
-                args,
-                logger=logger,
-                checkpoint_callback=checkpoint_callback,
-                callbacks=callbacks,
-            )
-            trainer.fit(model, datamodule=dm)
-            trainer.test(test_dataloaders=dm.val_dataloader)
+                trainer = pl.Trainer.from_argparse_args(
+                    args,
+                    logger=logger,
+                    checkpoint_callback=checkpoint_callback,
+                    callbacks=callbacks,
+                )
+                trainer.fit(model, datamodule=dm)
+                trainer.test(test_dataloaders=dm.val_dataloader)
 
 
 if __name__ == "__main__":
