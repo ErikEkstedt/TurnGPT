@@ -255,7 +255,7 @@ class ProsodyGPT(pl.LightningModule):
         parser.add_argument("--n_tokens", type=int, default=50259)
         parser.add_argument("--n_token_dim", type=int, default=768)
         parser.add_argument("--n_layer", type=int, default=1)
-        parser.add_argument("--n_head", type=int, default=1)
+        parser.add_argument("--n_head", type=int, default=2)
 
         # embedding
         parser.add_argument("--n_codes", type=int, default=256)
@@ -293,39 +293,44 @@ def PGPTExperiment(parser):
     batch = next(iter(dm.train_dataloader()))
 
     name = "PGPT"
-    for n_code_dim in [300, 100, 50]:
+    for n_code_dim in [300, 100, 60]:
         args.n_code_dim = n_code_dim
-        model = ProsodyGPT(
-            n_codes=args.n_codes,
-            n_code_dim=args.n_code_dim,
-            n_layer=args.n_layer,
-            n_head=args.n_head,
-            n_tokens=args.n_tokens,
-            n_token_dim=args.n_token_dim,
-            prosody_frames=args.prosody_frames,
-            prosody_in_channels=args.prosody_in_channels,
-            prosody_conv_hidden=args.prosody_conv_hidden,
-            prosody_kernel=args.prosody_kernel,
-            prosody_stride=args.prosody_stride,
-            prosody_activation=args.prosody_activation,
-        )
-        model.load_word_embeddings(EMB_PATH)
-        n_params = get_n_trainable_params(model)
-        # print(model)
-        print("n_code_dim: ", args.n_code_dim)
-        print("n_codes: ", args.n_codes)
-        print("parameters: ", n_params)
 
-        logger, checkpoint_callback, callbacks = logging(args, name=name)
+        for n_head in [2, 4, 1]:
+            args.n_head = n_head
 
-        trainer = pl.Trainer.from_argparse_args(
-            args,
-            logger=logger,
-            checkpoint_callback=checkpoint_callback,
-            callbacks=callbacks,
-        )
-        trainer.fit(model, datamodule=dm)
-        trainer.test(test_dataloaders=dm.val_dataloader)
+            model = ProsodyGPT(
+                n_codes=args.n_codes,
+                n_code_dim=args.n_code_dim,
+                n_layer=args.n_layer,
+                n_head=args.n_head,
+                n_tokens=args.n_tokens,
+                n_token_dim=args.n_token_dim,
+                prosody_frames=args.prosody_frames,
+                prosody_in_channels=args.prosody_in_channels,
+                prosody_conv_hidden=args.prosody_conv_hidden,
+                prosody_kernel=args.prosody_kernel,
+                prosody_stride=args.prosody_stride,
+                prosody_activation=args.prosody_activation,
+            )
+            model.load_word_embeddings(EMB_PATH)
+            n_params = get_n_trainable_params(model)
+            # print(model)
+            print("n_code_dim: ", args.n_code_dim)
+            print("n_head: ", args.n_head)
+            print("n_codes: ", args.n_codes)
+            print("parameters: ", n_params)
+
+            logger, checkpoint_callback, callbacks = logging(args, name=name)
+
+            trainer = pl.Trainer.from_argparse_args(
+                args,
+                logger=logger,
+                checkpoint_callback=checkpoint_callback,
+                callbacks=callbacks,
+            )
+            trainer.fit(model, datamodule=dm)
+            trainer.test(test_dataloaders=dm.val_dataloader)
 
 
 if __name__ == "__main__":
