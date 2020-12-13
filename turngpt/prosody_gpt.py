@@ -2,6 +2,8 @@ from argparse import ArgumentParser
 import umap
 import matplotlib.pyplot as plt
 import numpy as np
+from os.path import join
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -12,6 +14,7 @@ from turngpt.models.gpt_mini import Block, GPTConfig
 from turngpt.models import ConvEncoder, VectorQuantizerEMA
 from turngpt.transforms import ClassificationLabelTransform
 from turngpt.train_utils import logging
+from ttd.tokenizer_helpers import convert_ids_to_tokens
 
 
 EMB_PATH = "checkpoints/pretrained/PDECTWW/word_embedding_state_dict.pt"
@@ -46,6 +49,7 @@ class ProsodyGPT(pl.LightningModule):
         self,
         n_codes=128,
         n_code_dim=300,
+        commitment_cost=0.35,
         n_layer=1,
         n_head=1,
         n_tokens=50259,
@@ -95,7 +99,11 @@ class ProsodyGPT(pl.LightningModule):
         # Combine embedding
         self.modal_act = torch.sigmoid
         self.pre_vq = nn.Linear(2 * n_code_dim, n_code_dim)
-        self.vq = VectorQuantizerEMA(num_embeddings=n_codes, embedding_dim=n_code_dim)
+        self.vq = VectorQuantizerEMA(
+            num_embeddings=n_codes,
+            embedding_dim=n_code_dim,
+            commitment_cost=commitment_cost,
+        )
 
         # Combine positional embedding
         self.emb = self.vq._embedding
@@ -141,18 +149,21 @@ class ProsodyGPT(pl.LightningModule):
         x = torch.cat((xw, xa), dim=-1)
         x = self.pre_vq(x)
         emb, enc, vq_loss = self.vq(x)
+        return emb, enc, vq_loss
 
+    def pre_transformer_embedding(self, emb):
         # positional embedding for transformer
         B, N, _ = emb.size()
-        positions = torch.arange(N).repeat(B, 1).to(xa.device)
+        positions = torch.arange(N).repeat(B, 1).to(emb.device)
         pos_emb = self.pos_emb(positions)
 
         # total embedding
         emb = emb + pos_emb
-        return emb, vq_loss
+        return emb
 
     def forward(self, input_ids, xa):
-        emb, vq_loss = self.encode(input_ids, xa)
+        emb, enc, vq_loss = self.encode(input_ids, xa)
+        emb = self.pre_transformer_embedding(emb)
         h = self.transformer(emb)
         h = self.ln_f(h)
         y_pred = self.head(h)
@@ -206,6 +217,62 @@ class ProsodyGPT(pl.LightningModule):
         self.log("val_loss", loss)
         self.log("val_vq_loss", vq_loss)
         return {"val_loss": loss, "val_vq_loss": vq_loss}
+
+    def test_step(self, batch, *args, **kwargs):
+        x, y, input_ids = self.shared_step(batch)
+        y_pred, vq_loss = self(input_ids, x)
+        loss = self.loss_function(y_pred, y)
+        loss += vq_loss
+        # if n_batch == 0:
+        #     emb, enc, _ = self.encode(input_ids, x)
+        #     self.plot_probs_and_most_likely_code()
+
+        return {"test_loss": loss, "test_vq_loss": vq_loss}
+
+    def qualitative_plot(self, batch, tokenizer, max_samples=4, plot=False):
+        with torch.no_grad():
+            x, y, input_ids = self.shared_step(batch)
+            y_pred, vq_loss = self(input_ids.to(self.device), x.to(self.device))
+            emb, enc, _ = self.encode(input_ids.to(self.device), x.to(self.device))
+            loss = self.loss_function(y_pred, y.to(self.device))
+            loss += vq_loss
+            probs = torch.sigmoid(y_pred).cpu()
+
+        tokens = convert_ids_to_tokens(input_ids, tokenizer)
+        sp = input_ids == self.sp1_idx
+        sp += input_ids == self.sp2_idx
+        targets = sp[:, 1:].cpu()
+
+        n_plots = min(input_ids.shape[0], max_samples)
+        fig, ax = plt.subplots(n_plots, 1, figsize=(16, 3 * n_plots))
+        for i in range(input_ids.shape[0]):
+            if i == max_samples:
+                break
+            N = len(probs[i])
+            X = torch.arange(N)
+            ax[i].bar(X, probs[i], alpha=0.6)
+            ax[i].vlines(
+                torch.where(targets[i])[0], ymin=0, ymax=1, alpha=0.1, color="g"
+            )
+            ax[i].set_ylim([0, 1])
+            ax[i].set_xlim([0, N])
+            ax[i].set_xticks(X)
+            ax[i].set_xticklabels(tokens[i], rotation=65, fontsize=8)
+            code = [str(d) for d in enc[0].argmax(dim=-1).tolist()]
+            for j in range(N):
+                yy = (7 - j % 10) * 0.05 + 0.35
+                ax[i].text(x=j - 0.5, y=yy, s=code[j], fontsize=8)
+        plt.tight_layout()
+        if plot:
+            plt.pause(0.01)
+        return fig, ax
+
+    def projection_plot(self):
+        projection = umap.UMAP(
+            n_neighbors=3, min_dist=0.1, metric="cosine"
+        ).fit_transform(self.vq._embedding.weight.data.cpu())
+        fig, ax = self.plot_codes(projection, plot=False)
+        return fig, ax, projection
 
     def plot_codes(self, projection, plot=False):
         fig, ax = plt.subplots(1, 1)
@@ -290,53 +357,105 @@ def PGPTExperiment(parser):
     dm.prepare_data()
     dm.setup("fit")
 
+    name = "PGPT"
+    for n_code_dim in [100]:  # [300, 100, 60]:
+        args.n_code_dim = n_code_dim
+        for n_layer in [1]:
+            args.n_layer = n_layer
+            for n_head in [2]:
+                args.n_head = n_head
+                for n_codes in [10, 20, 40, 80, 100, 150, 200]:
+                    args.n_codes = n_codes
+                    model = ProsodyGPT(
+                        n_codes=args.n_codes,
+                        n_code_dim=args.n_code_dim,
+                        n_layer=args.n_layer,
+                        n_head=args.n_head,
+                        n_tokens=args.n_tokens,
+                        n_token_dim=args.n_token_dim,
+                        prosody_frames=args.prosody_frames,
+                        prosody_in_channels=args.prosody_in_channels,
+                        prosody_conv_hidden=args.prosody_conv_hidden,
+                        prosody_kernel=args.prosody_kernel,
+                        prosody_stride=args.prosody_stride,
+                        prosody_activation=args.prosody_activation,
+                    )
+                    model.load_word_embeddings(EMB_PATH)
+                    n_params = get_n_trainable_params(model)
+                    # print(model)
+                    print("n_codes: ", args.n_codes)
+                    print("n_code_dim: ", args.n_code_dim)
+                    print("n_layer: ", args.n_layer)
+                    print("n_head: ", args.n_head)
+                    print("parameters: ", n_params)
+
+                    logger, checkpoint_callback, callbacks = logging(args, name=name)
+
+                    trainer = pl.Trainer.from_argparse_args(
+                        args,
+                        logger=logger,
+                        checkpoint_callback=checkpoint_callback,
+                        callbacks=callbacks,
+                    )
+                    trainer.fit(model, datamodule=dm)
+                    trainer.test(test_dataloaders=dm.val_dataloader(), verbose=False)
+
+                    # plots
+                    batch = next(iter(dm.val_dataloader()))
+                    fig, ax = model.qualitative_plot(batch, dm.tokenizer, max_samples=4)
+                    fig_path = join(model.logger.log_dir, "sample")
+                    fig.savefig(fig_path)
+                    print("saved plot -> ", fig_path)
+
+                    fig, ax, proj = model.projection_plot()
+                    fig_path = join(model.logger.log_dir, "projection")
+                    fig.savefig(fig_path)
+                    print("saved plot -> ", fig_path)
+
+
+def evaluate():
+    from turngpt.acousticDM import AudioDM
+
+    parser = ArgumentParser()
+    parser = ProsodyGPT.add_model_specific_args(parser)
+    parser = pl.Trainer.add_argparse_args(parser)
+    parser = AudioDM.add_data_specific_args(
+        parser,
+        # datasets=["maptask"],
+        datasets=["switchboard"],
+        f0=True,
+        waveform=False,
+        f0_normalize=True,
+        f0_interpolate=True,
+        f0_smooth=True,
+        rms=True,
+        log_rms=True,
+    )
+    args = parser.parse_args()
+    args.early_stopping = True
+
+    dm = AudioDM(args)
+    dm.prepare_data()
+    dm.setup("fit")
+
     batch = next(iter(dm.train_dataloader()))
 
-    name = "PGPT"
-    for n_code_dim in [300, 100, 60]:
-        args.n_code_dim = n_code_dim
-        for n_layer in [1, 2]:
-            args.n_layer = n_layer
-            for n_head in [2, 4, 1]:
-                args.n_head = n_head
+    checkpoint = "checkpoints/PGPT/version_0/checkpoints/epoch=10-val_loss=0.13770.ckpt"
+    hparams = "checkpoints/PGPT/version_0/hparams.yaml"
+    model = ProsodyGPT.load_from_checkpoint(checkpoint, hparams_file=hparams)
+    model.eval()
 
-                model = ProsodyGPT(
-                    n_codes=args.n_codes,
-                    n_code_dim=args.n_code_dim,
-                    n_layer=args.n_layer,
-                    n_head=args.n_head,
-                    n_tokens=args.n_tokens,
-                    n_token_dim=args.n_token_dim,
-                    prosody_frames=args.prosody_frames,
-                    prosody_in_channels=args.prosody_in_channels,
-                    prosody_conv_hidden=args.prosody_conv_hidden,
-                    prosody_kernel=args.prosody_kernel,
-                    prosody_stride=args.prosody_stride,
-                    prosody_activation=args.prosody_activation,
-                )
-                model.load_word_embeddings(EMB_PATH)
-                n_params = get_n_trainable_params(model)
-                # print(model)
-                print("n_code_dim: ", args.n_code_dim)
-                print("n_head: ", args.n_head)
-                print("n_layer: ", args.n_layer)
-                print("n_codes: ", args.n_codes)
-                print("parameters: ", n_params)
-
-                logger, checkpoint_callback, callbacks = logging(args, name=name)
-
-                trainer = pl.Trainer.from_argparse_args(
-                    args,
-                    logger=logger,
-                    checkpoint_callback=checkpoint_callback,
-                    callbacks=callbacks,
-                )
-                trainer.fit(model, datamodule=dm)
-                trainer.test(test_dataloaders=dm.val_dataloader)
+    batch = next(iter(dm.val_dataloader()))
+    fig, ax = model.qualitative_plot(batch, dm.tokenizer, plot=True, max_samples=2)
+    fig, ax, proj = model.projection_plot()
+    plt.pause(0.01)
 
 
 if __name__ == "__main__":
 
+    from matplotlib import use as mpl_use
+
+    mpl_use("Agg")
     parser = ArgumentParser()
     parser.add_argument("--early_stopping", action="store_true")
     parser.add_argument("--patience", type=int, default=5)
