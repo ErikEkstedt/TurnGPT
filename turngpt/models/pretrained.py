@@ -1,4 +1,5 @@
 from argparse import ArgumentParser
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
@@ -183,3 +184,62 @@ class TurnGPTModel(pl.LightningModule):
         parser.add_argument("--pretrained", type=str, default="gpt2")
         parser.add_argument("--optimizer", type=str, default="adamw")
         return parser
+
+
+if __name__ == "__main__":
+
+    from turngpt.tokenizer import SpokenDialogTokenizer
+    from turngpt.models.utils import lm_sample, TRP, trp_from_logits
+
+    tokenizer = SpokenDialogTokenizer()
+
+    checkpoint = "/home/erik/projects/checkpoints/pretrained/PDECTWW/checkpoints/epoch=5-val_loss=2.86981_V2.ckpt"
+    model = TurnGPTModel.load_from_checkpoint(checkpoint)
+
+    turns = ["Hello, what do you need?", "I want food"]
+    input_ids, speaker_ids = tokenizer.turns_to_turngpt_tensors(turns)
+    print("input_ids: ", tuple(input_ids.shape))
+    print("speaker_ids: ", tuple(speaker_ids.shape))
+
+    # trp = TRP(model, input_ids, speaker_ids, tokenizer.sp1_idx, tokenizer.sp2_idx)[
+    #     0
+    # ].tolist()
+    # toks = tokenizer.convert_ids_to_tokens(input_ids[0])
+
+    sample_result = lm_sample(
+        model,
+        input_ids,
+        speaker_ids,
+        batch_size=5,
+        steps=50,
+        topk=5,
+        temperature=1.0,
+        sample=True,
+        stop_at_turn_shift=True,
+        max_context=100,
+        use_pbar=False,
+        sp1_idx=tokenizer.sp1_idx,
+        sp2_idx=tokenizer.sp2_idx,
+    )
+
+    # Only keep responses
+    responses = []
+    for output in sample_result["output_ids"]:
+        res = output[
+            input_ids.shape[-1] : -1
+        ]  # omit the input and the last speaker token
+        responses.append(tokenizer.ids_to_string(res))
+
+    for res in responses:
+        print(res)
+
+    input_str = " ".join(
+        tokenizer.format_special_chars(tokenizer.convert_ids_to_tokens(input_ids[0]))
+    )
+    print("Input: ", input_str)
+    print("-" * 70)
+    for output_ids in sample_result["output_ids"]:
+        output_str = " ".join(
+            tokenizer.format_special_chars(tokenizer.convert_ids_to_tokens(output_ids))
+        )
+        print("Output: ", output_str)
