@@ -1,6 +1,8 @@
 from tqdm import tqdm
 
 import torch
+import torch.nn as nn
+from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 
 
@@ -21,6 +23,97 @@ def TRP(
         speaker_ids = speaker_ids.to(model.device)
     out = model(input_ids.to(model.device), speaker_ids=speaker_ids)
     return trp_from_logits(out["logits"], sp1_idx, sp2_idx)
+
+
+def get_response_batch(context, responses, tokenizer):
+    input_ids, speaker_ids = tokenizer.turns_to_turngpt_tensors(
+        context, add_end_speaker_token=True
+    )
+    last_speaker = speaker_ids[0, -1]
+    new_speaker = (
+        tokenizer.sp1_idx if last_speaker == tokenizer.sp1_idx else tokenizer.sp1_idx
+    )
+    new_speaker = torch.tensor((new_speaker,))
+    context_len = input_ids.shape[-1]
+
+    r, l, sp = [], [], []
+    for res in responses:
+        # tmp = torch.cat((new_speaker, torch.tensor(tokenizer.encode(res))))
+        tmp = torch.tensor(tokenizer.encode(res))
+        r.append(tmp)
+        l.append(context_len + len(tmp) - 1)
+    r = pad_sequence(
+        r, batch_first=True, padding_value=tokenizer._tokenizer.pad_token_id
+    )
+
+    tmp_sp = new_speaker.repeat(r.shape)
+    speaker_ids = torch.cat([speaker_ids] * len(r))
+    speaker_ids = torch.cat([speaker_ids, tmp_sp], dim=-1)
+
+    input_ids = torch.cat([input_ids] * len(r))
+    input_ids = torch.cat((input_ids, r), dim=-1)
+
+    return input_ids, speaker_ids, l, context_len
+
+
+def get_best_response(context, responses, model, tokenizer):
+    loss_fn = nn.CrossEntropyLoss(reduction="none")
+
+    input_ids, speaker_ids, response_ends, context_len = get_response_batch(
+        context, responses, tokenizer
+    )
+
+    out = model(input_ids.to(model.device), speaker_ids.to(model.device))
+
+    labels = input_ids[:, 1:].contiguous()
+    logits = out["logits"][:, :-1].contiguous()
+
+    ce = loss_fn(
+        logits.view(-1, logits.size(-1)), labels.view(-1).to(model.device)
+    ).reshape(logits.shape[:-1])
+    # context_ce = ce[:, : context_len - 1].mean(dim=-1)
+
+    response_ce = []
+    for i, end in enumerate(response_ends):
+        res_ce = ce[i, context_len:end].mean().item()
+        response_ce.append(res_ce)
+
+    response_ce = torch.tensor(response_ce)
+    res_ce, perm_idx = response_ce.sort(descending=False)
+    best_response = perm_idx[0]
+    response = responses[best_response]
+    return response
+
+
+def predict_trp(
+    model,
+    input_ids,
+    speaker_ids,
+    N,
+    n_tokens,
+    topk=5,
+    temp=1.0,
+    sp1_idx=50257,
+    sp2_idx=50258,
+):
+    sample_result = lm_sample(
+        model,
+        input_ids,
+        speaker_ids,
+        batch_size=N,
+        steps=n_tokens,
+        topk=topk,
+        temperature=temp,
+        sample=True,
+        stop_at_turn_shift=False,
+        max_context=128,
+        use_pbar=False,
+    )
+    preds = sample_result["output_ids"][:, -n_tokens:]
+    n_eot = (preds == sp1_idx) + (preds == sp2_idx)
+    n_eot = n_eot.sum().item()
+    p = n_eot / N
+    return p
 
 
 @torch.no_grad()
