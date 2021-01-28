@@ -131,7 +131,7 @@ def response_ranking():
     """
     data = flask.request.get_json(force=True)
     response = get_best_response(
-        context=data["text"],
+        context=data["context"],
         responses=data["responses"],
         model=model,
         tokenizer=tokenizer,
