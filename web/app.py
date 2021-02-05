@@ -5,7 +5,13 @@ import flask
 
 import torch
 from turngpt.models.pretrained import TurnGPTModel
-from turngpt.models.utils import lm_sample, TRP, predict_trp, get_best_response
+from turngpt.models.utils import (
+    lm_sample,
+    TRP,
+    predict_trp,
+    get_best_response,
+    response_rank,
+)
 from turngpt.tokenizer import SpokenDialogTokenizer
 
 app = flask.Flask(__name__)
@@ -105,7 +111,7 @@ def prediction():
     data = request_to_tokens(data, add_end_speaker_token=False)
 
     n_tokens = 3
-    N = 50
+    N = 10
     topk = 5
     temp = 1.0
     p = predict_trp(
@@ -130,13 +136,20 @@ def response_ranking():
     Sample possible responses. Assume that the previous speaker is done.
     """
     data = flask.request.get_json(force=True)
-    response = get_best_response(
+    # response = get_best_response(
+    #     context=data["context"],
+    #     responses=data["responses"],
+    #     model=model,
+    #     tokenizer=tokenizer,
+    # )
+    responses = response_rank(
         context=data["context"],
         responses=data["responses"],
         model=model,
         tokenizer=tokenizer,
     )
-    response = {"response": response}
+    best_response = responses["responses"][0]
+    response = {"response": best_response}
     return flask.jsonify(response)
 
 

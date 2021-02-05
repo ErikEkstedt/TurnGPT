@@ -25,6 +25,66 @@ def TRP(
     return trp_from_logits(out["logits"], sp1_idx, sp2_idx)
 
 
+def response_rank(context, responses, model, tokenizer):
+    loss_fn = nn.CrossEntropyLoss(reduction="none")
+
+    @torch.no_grad()
+    def get_average_likelihood(input_ids, logits, lengths, context_len=0):
+        labels = input_ids[:, 1:].contiguous()
+        logits = logits[:, :-1].contiguous()
+        uncond_loss = loss_fn(
+            logits.view(-1, logits.size(-1)), labels.view(-1).to(logits.device)
+        ).reshape(logits.shape[:-1])
+
+        avg_likelihood = []
+        for tmp_loss, end in zip(uncond_loss, lengths):
+            # avg_likelihood.append(tmp_loss[context_len : end - 1].mean().item())
+            avg_likelihood.append(tmp_loss[context_len:end].mean().item())
+        avg_likelihood = torch.tensor(avg_likelihood)
+        return avg_likelihood
+
+    # Unconditional Likelihood
+    uncond_ids = []
+    lengths = []
+    for r in responses:
+        tmp_ids, _ = tokenizer.turns_to_turngpt_tensors(
+            [r], add_end_speaker_token=False
+        )
+        lengths.append(tmp_ids.shape[-1])
+        uncond_ids.append(tmp_ids[0])
+
+    lengths = torch.tensor(lengths)
+    uncond_ids = pad_sequence(
+        uncond_ids, batch_first=True, padding_value=tokenizer._tokenizer.pad_token_id
+    )
+    speaker_ids = torch.zeros_like(uncond_ids).fill_(tokenizer.sp1_idx)
+
+    with torch.no_grad():
+        out = model(uncond_ids.to(model.device), speaker_ids.to(model.device))
+
+    uncond = get_average_likelihood(uncond_ids, out["logits"], lengths)
+    ##########################################################################################
+
+    input_ids, speaker_ids, response_ends, context_len = get_response_batch(
+        context, responses, tokenizer
+    )
+    with torch.no_grad():
+        out = model(input_ids.to(model.device), speaker_ids.to(model.device))
+
+    cond = get_average_likelihood(
+        input_ids, out["logits"], response_ends, context_len - 1
+    )
+    score = uncond / cond
+
+    # Normalize responses p(r) / p(r|c)
+    score, perm_idx = score.sort(descending=True)
+
+    sorted_responses = []
+    for p in perm_idx:
+        sorted_responses.append(responses[p])
+    return {"score": score, "responses": sorted_responses}
+
+
 def get_response_batch(context, responses, tokenizer):
     input_ids, speaker_ids = tokenizer.turns_to_turngpt_tensors(
         context, add_end_speaker_token=True
@@ -63,7 +123,8 @@ def get_best_response(context, responses, model, tokenizer):
         context, responses, tokenizer
     )
 
-    out = model(input_ids.to(model.device), speaker_ids.to(model.device))
+    with torch.no_grad():
+        out = model(input_ids.to(model.device), speaker_ids.to(model.device))
 
     labels = input_ids[:, 1:].contiguous()
     logits = out["logits"][:, :-1].contiguous()
