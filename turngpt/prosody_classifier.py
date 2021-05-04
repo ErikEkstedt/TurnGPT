@@ -14,11 +14,6 @@ from turngpt.models import Attention1D
 from turngpt.train_utils import logging
 from turngpt.transforms import ClassificationLabelTransform
 
-from matplotlib import use as mpl_use
-
-mpl_use("Agg")
-pl.seed_everything(1234)
-
 
 class SelfAttention(nn.Module):
     """
@@ -76,7 +71,7 @@ class ConvEncoder(nn.Module):
         self,
         input_frames=100,
         hidden=32,
-        in_channels=1,
+        in_channels=2,
         num_layers=7,
         kernel_size=3,
         first_stride=2,
@@ -264,7 +259,7 @@ class ProsodyClassifier(pl.LightningModule):
     def __init__(
         self,
         in_frames=100,
-        in_channels=1,
+        in_channels=2,
         conv_hidden=64,
         layers=5,
         kernel=3,
@@ -934,6 +929,10 @@ def experiment_QRNN(parser):
 
 
 if __name__ == "__main__":
+    from matplotlib import use as mpl_use
+
+    mpl_use("Agg")
+    pl.seed_everything(1234)
 
     # enc = ProsodyClassifier()
     # x = torch.rand((16, 100))

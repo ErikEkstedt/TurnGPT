@@ -89,7 +89,7 @@ class ProsodyGPT(pl.LightningModule):
             num_layers=len(prosody_stride),
             kernel_size=prosody_kernel,
             padding=prosody_padding,
-            first_stride=prosody_stride,
+            strides=prosody_stride,
             activation=prosody_activation,
         )
         self.acoustic_projection = nn.Linear(
@@ -346,7 +346,7 @@ def PGPTExperiment(parser):
         waveform=False,
         f0_normalize=True,
         f0_interpolate=True,
-        f0_smooth=True,
+        f0_smooth=False,
         rms=True,
         log_rms=True,
     )
@@ -421,8 +421,8 @@ def evaluate():
     parser = pl.Trainer.add_argparse_args(parser)
     parser = AudioDM.add_data_specific_args(
         parser,
-        # datasets=["maptask"],
-        datasets=["switchboard"],
+        datasets=["maptask"],
+        # datasets=["switchboard"],
         f0=True,
         waveform=False,
         f0_normalize=True,
@@ -432,7 +432,6 @@ def evaluate():
         log_rms=True,
     )
     args = parser.parse_args()
-    args.early_stopping = True
 
     dm = AudioDM(args)
     dm.prepare_data()
@@ -442,7 +441,8 @@ def evaluate():
 
     checkpoint = "checkpoints/PGPT/version_0/checkpoints/epoch=10-val_loss=0.13770.ckpt"
     hparams = "checkpoints/PGPT/version_0/hparams.yaml"
-    model = ProsodyGPT.load_from_checkpoint(checkpoint, hparams_file=hparams)
+    # model = ProsodyGPT.load_from_checkpoint(checkpoint, hparams_file=hparams)
+    model = ProsodyGPT.load_from_checkpoint(checkpoint)
     model.eval()
 
     batch = next(iter(dm.val_dataloader()))

@@ -157,17 +157,30 @@ def interpolate_forward_slow(f0, voiced, start_vals=None):
 
 def interpolate_forward(f0, voiced):
     f = f0.clone()
-    for i, v in enumerate(voiced):
+    if f0.ndim == 1:
+        v = voiced
         idx, dur, val = find_island_idx_len(v.float())
         # unvoiced -> value prior unvoiced
         dur = dur[val == 0]
         idx = idx[val == 0]
         for ii, dd in zip(idx, dur):
             if ii - 1 < 0:
-                tmp_val = f[i, 0]
+                tmp_val = f[0]
             else:
-                tmp_val = f[i, ii - 1]
-            f[i, ii : ii + dd] = tmp_val
+                tmp_val = f[ii - 1]
+            f[ii : ii + dd] = tmp_val
+    else:
+        for i, v in enumerate(voiced):
+            idx, dur, val = find_island_idx_len(v.float())
+            # unvoiced -> value prior unvoiced
+            dur = dur[val == 0]
+            idx = idx[val == 0]
+            for ii, dd in zip(idx, dur):
+                if ii - 1 < 0:
+                    tmp_val = f[i, 0]
+                else:
+                    tmp_val = f[i, ii - 1]
+                f[i, ii : ii + dd] = tmp_val
     return f
 
 

@@ -168,7 +168,7 @@ class ConvEncoder(nn.Module):
         in_channels=1,
         num_layers=7,
         kernel_size=3,
-        first_stride=2,
+        strides=2,
         padding=0,
         activation="ReLU",
         independent=False,
@@ -179,17 +179,15 @@ class ConvEncoder(nn.Module):
         self.hidden = hidden
         self.num_layers = num_layers
         self.kernel_size = kernel_size
-        self.first_stride = first_stride
+        self.strides = strides
         self.padding = padding
         self.activation = getattr(nn, activation)
 
-        if isinstance(self.first_stride, int):
-            self.first_stride = [1] * self.num_layers
-            self.first_stride[0] = first_stride
+        if isinstance(self.strides, int):
+            self.strides = [1] * self.num_layers
+            self.strides[0] = strides
         else:
-            assert (
-                len(self.first_stride) == num_layers
-            ), "provide as many strides as layers"
+            assert len(self.strides) == num_layers, "provide as many strides as layers"
 
         if isinstance(kernel_size, int):
             self.kernel_size = [kernel_size] * self.num_layers
@@ -220,7 +218,7 @@ class ConvEncoder(nn.Module):
         n = self.input_frames
         for i in range(0, self.num_layers):
             n = self.conv_output_size(
-                n, self.kernel_size[i], self.padding[i], stride=self.first_stride[i]
+                n, self.kernel_size[i], self.padding[i], stride=self.strides[i]
             )
         return n
 
@@ -230,10 +228,11 @@ class ConvEncoder(nn.Module):
                 in_channels=self.in_channels,
                 out_channels=self.hidden,
                 kernel_size=self.kernel_size[0],
-                stride=self.first_stride[0],
+                stride=self.strides[0],
                 padding=self.padding[0],
                 groups=self.groups,
             ),
+            nn.BatchNorm1d(self.hidden),
             self.activation(),
         ]
         for i in range(1, self.num_layers):
@@ -242,10 +241,11 @@ class ConvEncoder(nn.Module):
                     in_channels=self.hidden,
                     out_channels=self.hidden,
                     kernel_size=self.kernel_size[i],
-                    stride=self.first_stride[i],
+                    stride=self.strides[i],
                     padding=self.padding[i],
                     groups=self.groups,
                 ),
+                nn.BatchNorm1d(self.hidden),
                 self.activation(),
             ]
         return nn.Sequential(*layers)

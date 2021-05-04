@@ -1,0 +1,8 @@
+{
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__"
+  ],
+  "venv": "ttd",
+	"venvPath": "/home/erik/miniconda3/envs"
+}

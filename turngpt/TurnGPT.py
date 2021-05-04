@@ -7,7 +7,6 @@ import pytorch_lightning as pl
 
 # from turngpt.proximity_loss import proximity_loss
 from turngpt.models import Attention1D
-from turngpt.models.pretrained import TurnGPTModel
 from turngpt.models.gpt_mini import GPT
 from turngpt.models.proximity import ProxTransformer
 from turngpt.models.gpt_rnn import RNN

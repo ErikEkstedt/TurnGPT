@@ -4,7 +4,6 @@ from os import makedirs, listdir
 from glob import glob
 from tqdm import tqdm
 import math
-import time
 import librosa
 
 import torch
@@ -21,7 +20,7 @@ from ttd.tokenizer import (
     get_special_tokens_dict,
 )
 
-from turngpt.F0 import F0, f0_z_normalize, interpolate_forward, F0_swipe
+from turngpt.F0 import f0_z_normalize, interpolate_forward
 
 
 # def get_f0_path(root, sr, hop_time):
@@ -203,7 +202,9 @@ class AcousticDataset(Dataset):
         rms = []
         for w in waveform:
             _rms = torch.from_numpy(
-                librosa.feature.rms(w, hop_length=80, frame_length=160)[0, :-1]
+                librosa.feature.rms(
+                    w, hop_length=self.hop_length, frame_length=2 * self.hop_length
+                )[0, :-1]
             )  # omit last frame for size
             rms.append(_rms)
         return torch.stack(rms)

@@ -43,7 +43,9 @@ def response_rank(context, responses, model, tokenizer):
         avg_likelihood = torch.tensor(avg_likelihood)
         return avg_likelihood
 
+    ############################################################
     # Unconditional Likelihood
+    ############################################################
     uncond_ids = []
     lengths = []
     for r in responses:
@@ -63,8 +65,10 @@ def response_rank(context, responses, model, tokenizer):
         out = model(uncond_ids.to(model.device), speaker_ids.to(model.device))
 
     uncond = get_average_likelihood(uncond_ids, out["logits"], lengths)
-    ##########################################################################################
 
+    ############################################################
+    # Conditional Likelihood
+    ############################################################
     input_ids, speaker_ids, response_ends, context_len = get_response_batch(
         context, responses, tokenizer
     )
@@ -74,15 +78,42 @@ def response_rank(context, responses, model, tokenizer):
     cond = get_average_likelihood(
         input_ids, out["logits"], response_ends, context_len - 1
     )
-    score = uncond / cond
 
-    # Normalize responses p(r) / p(r|c)
+    ############################################################
+    # Add the EOT probs to data
+    ############################################################
+    diff = (speaker_ids[0, 1:] - speaker_ids[0, :-1]).abs()
+    d = torch.where(diff == 1)[0]
+    start = d[-2] + 2  # +2 to not include speaker token
+    end = context_len - 1  # -1 to not include speaker token
+
+    probs = torch.softmax(out["logits"][0], dim=-1)
+    eot = torch.stack(
+        (probs[:, tokenizer.sp1_idx], probs[:, tokenizer.sp2_idx]), dim=-1
+    )
+    eot, _ = torch.max(eot, dim=-1)
+    eot = eot[start:end].tolist()
+    # tokens = tokenizer.convert_ids_to_tokens(input_ids[0])[start:end]
+    tokens = tokenizer.ids_to_string(input_ids[0])
+    print(tokens)
+    tokens = tokens.split()[start:end]
+    print(out["logits"].shape)
+    print("context_len: ", context_len)
+    print("start: ", start)
+    print("end: ", end)
+    print(tokens)
+    print(eot)
+
+    ############################################################
+    # Score
+    ############################################################
+    score = uncond / cond
     score, perm_idx = score.sort(descending=True)
 
     sorted_responses = []
     for p in perm_idx:
         sorted_responses.append(responses[p])
-    return {"score": score, "responses": sorted_responses}
+    return {"score": score, "responses": sorted_responses, "tokens": tokens, "eot": eot}
 
 
 def get_response_batch(context, responses, tokenizer):

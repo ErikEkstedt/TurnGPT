@@ -1,67 +1,44 @@
 import math
 import torch
 import torch.nn as nn
-import numpy as np
+import torchaudio.transforms as AT
+import torchaudio.functional as AF
 
-from turngpt.turngpt_utils import get_positive_and_negative_indices
+from turngpt.F0 import F0, f0_z_normalize, interpolate_forward, F0_swipe
 
 
-class ClassificationLabelTransform(object):
-    def __init__(
-        self,
-        ratio=1,
-        sp1_idx=50257,
-        sp2_idx=50258,
-        pad_idx=50256,
-        max_batch_size=256,
-        unigram=True,
-    ):
-        self.ratio = ratio
-        self.sp1_idx = sp1_idx
-        self.sp2_idx = sp2_idx
-        self.pad_idx = pad_idx
-        self.unigram = unigram
+class Pitch(nn.Module):
+    def __init__(self, sr=8000, hop_time=0.01, f0_min=60, f0_max=400, f0_threshold=0.2):
+        super().__init__()
+        self.sr = sr
+        self.hop_time = hop_time
+        self.f0_min = f0_min
+        self.f0_max = f0_max
+        self.f0_threshold = f0_threshold
 
-        self.max_batch_size = max_batch_size
-
-    def _unigram(self, x, input_ids):
-        pos, neg = get_positive_and_negative_indices(
-            input_ids, self.sp1_idx, self.sp2_idx, self.pad_idx
+        self._F0 = F0(
+            sr=sr,
+            hop_time=hop_time,
+            f0_min=f0_min,
+            f0_max=f0_max,
+            f0_threshold=f0_threshold,
         )
 
-        # positive
-        n_pos = len(pos[0])
-        pos_x = x[pos]
+    def forward(self, x):
+        reshape = False
+        if x.ndim == 3:
+            B, N, n_samples = x.size()
+            reshape = True
+            x = x.view(-1, n_samples)
 
-        # negative
-        n_neg = len(neg[0])
-        N = int(n_pos / self.ratio)
-        neg_idx = torch.from_numpy(np.random.choice(n_neg, N)).long()
-        neg_x = x[neg][neg_idx]
+        f0 = []
+        for tmp_x in x:
+            f0.append(self._F0(tmp_x.unsqueeze(0))["f0"][0, :-1])
+        f0 = torch.stack(f0)
 
-        pos_inp = input_ids[pos]
-        neg_inp = input_ids[neg][neg_idx]
-        inp = torch.cat((pos_inp, neg_inp))
-
-        x = torch.cat((pos_x, neg_x))
-        y = torch.zeros((x.shape[0],), dtype=torch.long, device=x.device)
-        y[:n_pos] = 1
-        return x, y, inp
-
-    def onehot_speaker_shift(self, x, input_ids):
-        sp = input_ids == self.sp1_idx
-        sp += input_ids == self.sp2_idx
-        sp = torch.cat(
-            (sp[:, 1:], torch.zeros(sp.shape[0], 1).to(input_ids.device)), dim=-1
-        )
-        return x, sp, input_ids
-
-    def __call__(self, x, input_ids):
-
-        if self.unigram:
-            return self._unigram(x, input_ids)
-        else:
-            return self.onehot_speaker_shift(x, input_ids)
+        if reshape:
+            f0 = f0.contiguous().view(B, N, -1)
+        return f0
 
 
 class Gaussian1D(nn.Module):
@@ -129,25 +106,25 @@ if __name__ == "__main__":
     from argparse import ArgumentParser
     from turngpt.acousticDM import AudioDM
     from ttd.tokenizer_helpers import convert_ids_to_tokens
-    from turngpt.turngpt_utils import get_speaker_shift_indices
-    from turngpt.models import gradient_check_batch, gradient_check_word_time
     import matplotlib.pyplot as plt
+    import sounddevice as sd
 
     parser = ArgumentParser()
     parser = AudioDM.add_data_specific_args(
         parser,
         datasets=["maptask"],
+        # datasets=["switchboard"],
         f0=True,
         waveform=True,
-        f0_normalize=True,
-        f0_interpolate=True,
+        normalize_f0=True,
+        interpolate_f0=True,
         rms=True,
         log_rms=True,
     )
     args = parser.parse_args()
     for k, v in vars(args).items():
         print(f"{k}: {v}")
-    args.batch_size = 16
+    args.batch_size = 4
     dm = AudioDM(args)
     dm.prepare_data()
     dm.setup("fit")
@@ -155,26 +132,56 @@ if __name__ == "__main__":
 
     batch = next(iter(loader))
 
-    batch_transform = ClassificationLabelTransform(
-        ratio=1.0,
-        sp1_idx=dm.sp1_idx,
-        sp2_idx=dm.sp2_idx,
-        pad_idx=dm.pad_idx,
-        unigram=False,
-    )
+    w = batch["waveform"]
+    tokens = convert_ids_to_tokens(batch["input_ids"], dm.tokenizer)
+    f = batch["f0"]
 
-    input_ids = batch["input_ids"]
-    x = torch.stack((batch["f0"], batch["rms"]), dim=-1)
-    print("pros: ", x.shape)
-    x, y, inp = batch_transform(x, input_ids)
-    print("x: ", x.shape, x.device, x.dtype)
-    print("y: ", y.shape, y.device, y.dtype)
+    pitcher = Pitch()
+    p = pitcher(w)
 
-    tokens = convert_ids_to_tokens(inp, dm.tokenizer)
-    fig, ax = plt.subplots(1, 1)
-    for i in range(len(x)):
-        ax.cla()
-        ax.set_title(f"{tokens[i]}, label: {y[i].item()}")
-        ax.plot(x[i, :, 0])
+    pp = []
+    for _p in p:
+        pp.append(interpolate_forward(_p, _p != 0))
+    pp = torch.stack(pp)
+
+    gaussian_filter = Gaussian1D(kernel_size=3)
+    pg = gaussian_filter(pp.view(-1, pp.shape[-1]).unsqueeze(-2))
+    pg = pg.view(*pp.shape)
+
+    from tqdm import tqdm
+
+    _F0 = F0(sr=8000, hop_time=0.01, f0_threshold=0.2)
+
+    new_f = []
+    for b in range(f.shape[0]):
+        batch_f = []
+        for i in tqdm(range(f.shape[1])):
+            _f = _F0(w[b, i].unsqueeze(0))["f0"][0, :-1]
+            v = _f != 0
+            _f = interpolate_forward(_f.unsqueeze(0), v.unsqueeze(0))[0]
+            batch_f.append(_f)
+        new_f.append(torch.stack(batch_f))
+    new_f = torch.stack(new_f)
+
+    b = 0
+    fig, ax = plt.subplots(3, 1)
+    for i in range(w.shape[1]):
+        for a in ax:
+            a.cla()
+        if i != 127:
+            ax[0].set_title(tokens[b, i] + " -> " + tokens[b, i + 1])
+        ax[0].plot(w[b, i])
+        ax[1].plot(f[b, i])
+        ppp = pg[b, i].clone()
+        # ppp[ppp!=0] = ppp[ppp!=0].log()
+        # ax[2].plot((pp[b, i]+1e-8).log())
+        ax[2].plot(ppp)
+        # ax[2].set_ylim([2,6])
+        ax[2].set_ylim([80, 250])
+        # ax[2].plot(new_f[b, i])
+        ax[0].set_xlim([0, 8000])
+        ax[1].set_xlim([0, 100])
+        ax[2].set_xlim([0, 100])
+        plt.tight_layout()
         plt.pause(0.01)
         input()
