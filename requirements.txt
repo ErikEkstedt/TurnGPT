@@ -1,0 +1,6 @@
+transformers
+tokenizers
+pytorch-lightning
+wandb
+matplotlib
+einops
