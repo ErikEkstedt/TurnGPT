@@ -81,14 +81,14 @@ def train():
 
     # DataModule
     dm = ConversationalDM(
-        model.tokenizer,
+        datasets=args.datasets,
+        tokenizer=model.tokenizer,
         batch_size=args.batch_size,
         max_length=args.max_length,
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
         savepath=args.savepath,
         overwrite=args.overwrite,
-        datasets=args.datasets,
         load_from_cache_file=args.load_from_cache_file,
         num_proc=args.num_proc,
     )
