@@ -3,24 +3,6 @@ import torch
 from turngpt.tokenizer import SpokenDialogTokenizer
 
 
-INPUT = {
-    "list_a": [
-        "Hello there I basically had the worst day of my life",
-        "Oh no, what happened?",
-        "Do you want the long or the short story?",
-    ],
-    "list_b": [
-        "Hello there I basically had the worst day of my life",
-        "Oh no, what happened?",
-    ],
-}
-INPUT["list_of_list"] = [INPUT["list_a"], INPUT["list_b"]]
-
-
-string_a = 'Yesterday Hello ther, "honey"<ts> godday... you are great<ts> Not as good as you!<ts>'
-string_b = 'Yesterday hello ther , "honey"<ts> godday... you are great<ts> Not as good as you!<ts>'
-
-
 @pytest.fixture(
     scope="module",
     params=[
