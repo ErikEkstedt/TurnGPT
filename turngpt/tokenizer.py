@@ -139,7 +139,11 @@ class SpokenDialogTokenizer(SpokenNormalizer):
     def eos_token_id(self):
         return self._tokenizer.eos_token_id
 
-    def __init__(self, pretrained_model_name_or_path="microsoft/DialoGPT-medium"):
+    def __init__(
+        self,
+        pretrained_model_name_or_path: str = "microsoft/DialoGPT-medium",
+        normalization=True,
+    ):
         super().__init__()
         self.name_or_path = pretrained_model_name_or_path
         if pretrained_model_name_or_path not in self.MODELS:
@@ -149,6 +153,7 @@ class SpokenDialogTokenizer(SpokenNormalizer):
         self._tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path, max_model_input_sizes=None
         )
+        self.normalization = normalization
 
         # Set to large number to avoid warnings
         # Manually keep track of your models maximum input length
@@ -180,6 +185,11 @@ class SpokenDialogTokenizer(SpokenNormalizer):
 
     def __len__(self):
         return len(self._tokenizer)
+
+    def normalize(self, string: str) -> str:
+        if self.normalization:
+            return self.normalize_string(string)
+        return string
 
     def __call__(
         self,
@@ -216,24 +226,23 @@ class SpokenDialogTokenizer(SpokenNormalizer):
                         ret[k] = []
                     ret[k].append(v)
             return ret
+
         # List of strings, a dialog: ['hello', 'hello to you']
         elif isinstance(text, List):
             dialog_string = ""
             if include_pre_space:
                 dialog_string = " "
-            dialog_string += self.normalize_string(text[0])
+            dialog_string += self.normalize(text[0])
             if len(text) > 1:
                 dialog_string += self.eos_token
                 for text_string in text[1:-1]:
-                    dialog_string += (
-                        " " + self.normalize_string(text_string) + self.eos_token
-                    )
-                dialog_string += " " + self.normalize_string(text[-1])
+                    dialog_string += " " + self.normalize(text_string) + self.eos_token
+                dialog_string += " " + self.normalize(text[-1])
             if include_end_ts:
                 dialog_string += self.eos_token
             text = dialog_string
         else:
-            text = self.normalize_string(text)
+            text = self.normalize(text)
 
         encoding = self._tokenizer(
             text=text,
