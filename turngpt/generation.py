@@ -331,13 +331,14 @@ def generate(
         return generate_greedy(model, context, n_steps=n_steps, stop_at_eos=stop_at_eos)
 
 
-if __name__ == "__main__":
+def debug():
     from os.path import join
     from turngpt.model import TurnGPT
 
     # Load trained model
     checkpoint = join(
-        "assets/TurnGPT_proj/version_0/checkpoints/epoch=45-val_loss=-3.37196.ckpt"
+        # "assets/TurnGPT_proj/version_0/checkpoints/epoch=45-val_loss=-3.37196.ckpt"
+        "runs/TurnGPT/TurnGPT_1bwldr6v/epoch=13_val_loss=1.3294.ckpt"
     )
     model = TurnGPT.load_from_checkpoint(checkpoint)
     model = model.eval().to("cuda")
@@ -345,24 +346,25 @@ if __name__ == "__main__":
     # Arguments
     context = ["Hello, how are you doing?", "I am well and you?"]
     context = [
-        "Hello there I basically had the worst day of my life",
-        "Oh no, what happened?",
-        "Do you want the long or the short story?",
+        # "Hello there I basically had the worst day of my life",
+        "So are you a student here at this university?",
+        # "Oh no, what happened?",
+        # "Do you want the long or the short story?",
     ]
-    context = [
-        "Hello there how can i help you",
-        "I want to go and see a movie can you help me",
-    ]
+    # context = [
+    #     "Hello there how can i help you",
+    #     "I want to go and see a movie can you help me",
+    # ]
     # model.omit_dialog_states = True
     sampled = generate(
         model,
         context,
-        n_trajectories=100,
-        n_steps=50,
-        top_p=-1,
+        n_trajectories=10,
+        n_steps=100,
+        top_p=0.95,
         top_k=10,
         strategy="sampling",
-        stop_at_eos=True,
+        stop_at_eos=False,
     )
     for c in context:
         print(c)
@@ -399,3 +401,40 @@ if __name__ == "__main__":
     for text in sampled["tokens"]:
         print(text)
         print("-" * 30)
+
+
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+    from turngpt.model import TurnGPT
+
+    parser = ArgumentParser()
+    parser.add_argument("--checkpoint", "-c", type=str)
+    parser.add_argument("--strategy", "-s", type=str, default="sampling")
+    parser.add_argument("--stop_at_ts", action="store_true")
+    parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--trajectories", type=int, default=10)
+    args = parser.parse_args()
+
+    model = TurnGPT.load_from_checkpoint(args.checkpoint)
+    model = model.eval()
+    if torch.cuda.is_available():
+        model = model.to("cuda")
+
+    while True:
+        context = [input("Context: ")]
+        sampled = generate(
+            model,
+            context,
+            n_trajectories=args.trajectories,
+            n_steps=args.steps,
+            strategy=args.strategy,
+            stop_at_eos=args.stop_at_ts,
+        )
+        print("=" * 50)
+        print(f"Most likely {sampled['most_likely']}:")
+        print("=" * 50)
+        print(sampled["tokens"][sampled["most_likely"]])
+        print("=" * 50)
+        con = input("Exit? (y/n)")
+        if con.lower() == "y":
+            break
