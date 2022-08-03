@@ -141,7 +141,7 @@ class SpokenDialogTokenizer(SpokenNormalizer):
 
     def __init__(
         self,
-        pretrained_model_name_or_path: str = "microsoft/DialoGPT-medium",
+        pretrained_model_name_or_path: str = "gpt2",
         normalization=True,
     ):
         super().__init__()

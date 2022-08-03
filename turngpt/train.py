@@ -58,6 +58,8 @@ def train():
     parser.add_argument("--patience", default=10, type=int)
     args = parser.parse_args()
 
+    print("Datasets: ", args.datasets)
+
     pl.seed_everything(args.seed)
 
     # Model
