@@ -1,6 +1,9 @@
 import os
+
+import lightning as L
 from datasets import load_dataset
 from torch.utils.data import DataLoader
+
 from turngpt.tokenizer import SpokenDialogTokenizer
 
 DATASETS = {"soda": "allenai/soda"}  # "faithdial": "McGill-NLP/FaithDial"}
@@ -56,18 +59,21 @@ def load_soda():
     return dset
 
 
-class SodaDM:
+class SodaDM(L.LightningDataModule):
     def __init__(
         self,
-        batch_size: int,
+        batch_size: int = 4,
         num_workers: int = -1,
+        max_length: int = 256,
     ) -> None:
+        super().__init__()
         self.batch_size = batch_size
         if num_workers == -1:
             cpus = os.cpu_count()
             num_workers = 4 if cpus is None else cpus
         self.num_workers = num_workers
         self.pin_memory = True
+        self.max_length = max_length
         self.tokenizer = SpokenDialogTokenizer()
 
     def prepare_data(self):
@@ -86,9 +92,11 @@ class SodaDM:
             self.test_dset = dset["test"]
 
     def collate_fn(self, batch):
-        ret = self.tokenizer.pad({"input_ids": [b["input_ids"] for b in batch]})
+        ret = self.tokenizer.pad(
+            {"input_ids": [b["input_ids"][: self.max_length] for b in batch]}
+        )
         ret["speaker_ids"] = self.tokenizer.pad(
-            {"input_ids": [b["speaker_ids"] for b in batch]}
+            {"input_ids": [b["speaker_ids"][: self.max_length] for b in batch]}
         )["input_ids"]
         return ret
 
@@ -116,4 +124,14 @@ if __name__ == "__main__":
     dm = SodaDM(batch_size=4)
     # dm.prepare_data()
     dm.setup("fit")
+
+    import os
+
+    os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
+
     batch = next(iter(dm.train_dataloader()))
+
+    batch["input_ids"].shape
+
+    for batch in dm.train_dataloader():
+        print(batch["input_ids"].shape)

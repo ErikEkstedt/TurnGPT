@@ -1,14 +1,14 @@
 from argparse import ArgumentParser
-from os import makedirs
+from os import environ, makedirs
 from os.path import join
-from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 
-import pytorch_lightning as pl
+import lightning as L
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.cli import LightningCLI
+from lightning.pytorch.loggers import WandbLogger
 
-from datasets_turntaking import DialogTextDM
+from turngpt.dataset import SodaDM
 from turngpt.model import TurnGPT, TurnGPTWandbCallbacks
-
 
 PROJECT = "TurnGPT"
 SAVE_DIR = "runs/TurnGPT"
@@ -48,51 +48,22 @@ def default_logger_callbacks(name, args, callbacks):
 
 
 def train():
-    parser = ArgumentParser()
-    parser = TurnGPT.add_model_specific_args(parser)
-    parser = DialogTextDM.add_data_specific_args(parser)
-    parser = pl.Trainer.add_argparse_args(parser)
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--name_info", type=str, default="")
-    parser.add_argument("--early_stopping", action="store_true")
-    parser.add_argument("--patience", default=10, type=int)
-    args = parser.parse_args()
 
-    print("Datasets: ", args.datasets)
-
-    pl.seed_everything(args.seed)
+    environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
+    L.seed_everything(1)
 
     # Model
     print("Loading Model...")
-    model = TurnGPT(
-        pretrained_model_name_or_path=args.pretrained_model_name_or_path,
-        trp_projection_steps=args.trp_projection_steps,
-        trp_projection_type=args.trp_projection_type,
-        weight_loss=args.weight_loss,
-        weight_eos_token=args.weight_eos_token,
-        weight_regular_token=args.weight_regular_token,
-        learning_rate=args.learning_rate,
-        dropout=args.dropout,
-        pretrained=args.pretrained,
-        no_train_first_n=args.no_train_first_n,
-        omit_dialog_states=args.omit_dialog_states,
-    )
+    model = TurnGPT()
     model.init_tokenizer()  # required for fresh model (saved on checkpoint)
     model.initialize_special_embeddings()  # required for fresh model (also performed in on_load_checkpoint)
     model.print_parameters()
 
     # DataModule
-    dm = DialogTextDM(
-        datasets=args.datasets,
-        tokenizer=model.tokenizer,
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
-        savepath=args.savepath,
-        overwrite=args.overwrite,
-        load_from_cache_file=args.load_from_cache_file,
-        num_proc=args.num_proc,
+    dm = SodaDM(
+        batch_size=4,
+        max_length=256,
+        num_workers=4,
     )
     dm.prepare_data()
 
@@ -101,21 +72,17 @@ def train():
     callbacks = None
 
     # this should be handled automatically with pytorch_lightning?
-    if not args.fast_dev_run:
-        callbacks = [TurnGPTWandbCallbacks()]
-        logger, callbacks = default_logger_callbacks(
-            name=model.run_name, args=args, callbacks=callbacks
-        )
+    # if not args.fast_dev_run:
+    #     callbacks = [TurnGPTWandbCallbacks()]
+    #     logger, callbacks = default_logger_callbacks(
+    #         name=model.run_name, args=args, callbacks=callbacks
+    #     )
 
     # Trainer
-    trainer = pl.Trainer.from_argparse_args(
-        args=args,
-        logger=logger,
-        callbacks=callbacks,
-    )
-
+    trainer = L.Trainer(fast_dev_run=True)
     trainer.fit(model, datamodule=dm)
 
 
 if __name__ == "__main__":
-    train()
+    # train()
+    cli = LightningCLI(TurnGPT, SodaDM)

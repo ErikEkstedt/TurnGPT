@@ -1,19 +1,19 @@
 from argparse import ArgumentParser
+
+import lightning as L
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-import wandb
-
-from transformers import GPT2LMHeadModel, GPT2Config
-from transformers.models.gpt2.modeling_gpt2 import GPT2DoubleHeadsModelOutput
-import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+import wandb
+from lightning.pytorch.callbacks import Callback
+from transformers import GPT2Config, GPT2LMHeadModel
+from transformers.models.gpt2.modeling_gpt2 import GPT2DoubleHeadsModelOutput
 
 from turngpt.generation import generate
 from turngpt.plot_utils import plot_trp
 from turngpt.projection_labeler import ProjectionLabeler
 from turngpt.tokenizer import SpokenDialogTokenizer
-
 
 mpl.use("agg")
 
@@ -143,7 +143,7 @@ class Utils:
         return out
 
 
-class TurnGPTWandbCallbacks(pl.Callback):
+class TurnGPTWandbCallbacks(Callback):
     turn_list = [
         ["yesterday we met in the park", "okay when will you meet again", "tomorrow"],
         [
@@ -235,7 +235,7 @@ class TurnGPTWandbCallbacks(pl.Callback):
         self.generate(trainer, pl_module, name="Gen-chpt")
 
 
-class TurnGPT(pl.LightningModule, Utils):
+class TurnGPT(L.LightningModule, Utils):
     """
     This is the code example of teaching and research.
 

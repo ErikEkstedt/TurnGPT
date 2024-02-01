@@ -1,6 +1,7 @@
 transformers
+datasets
 tokenizers
-pytorch-lightning
+lightning
 wandb
 matplotlib
 einops
