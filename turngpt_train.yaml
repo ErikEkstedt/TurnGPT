@@ -1,0 +1,75 @@
+# lightning.pytorch==2.1.3
+seed_everything: true
+trainer:
+  accelerator: auto
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  precision: null
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      name: TurnGPTNew
+      save_dir: log/
+      project: TurnGPTNew
+      log_model: false
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        filename: "turngpt_{epoch}_{val_loss:.4f}"
+        save_top_k: 1
+        mode: "min"
+        monitor: "val_loss"
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: "val_loss"
+        patience: 3
+        strict: true
+        verbose: true
+  fast_dev_run: false
+  max_epochs: null
+  min_epochs: null
+  max_steps: -1
+  min_steps: null
+  max_time: null
+  limit_train_batches: null
+  limit_val_batches: null
+  limit_test_batches: null
+  limit_predict_batches: null
+  overfit_batches: 0.0
+  val_check_interval: null
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: null
+  log_every_n_steps: null
+  enable_checkpointing: null
+  enable_progress_bar: null
+  enable_model_summary: null
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+  gradient_clip_algorithm: null
+  deterministic: null
+  benchmark: null
+  inference_mode: true
+  use_distributed_sampler: true
+  profiler: null
+  detect_anomaly: false
+  barebones: false
+  plugins: null
+  sync_batchnorm: false
+  reload_dataloaders_every_n_epochs: 0
+  default_root_dir: null
+model:
+  pretrained_model_name_or_path: gpt2
+  pretrained: true
+  trp_projection_steps: -1
+  trp_projection_type: linear
+  omit_dialog_states: false
+  no_train_first_n: 5
+  learning_rate: 0.0001
+  weight_loss: false
+  weight_regular_token: 0.5
+  weight_eos_token: 1.0
+data:
+  batch_size: 4
+  num_workers: -1
+  max_length: 256

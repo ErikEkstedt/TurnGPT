@@ -617,62 +617,6 @@ class TurnGPT(L.LightningModule, Utils):
 
         self.log("val_loss", total_loss)
 
-    @staticmethod
-    def add_model_specific_args(parent_parser):
-        """Specify the hyperparams for this LightningModule"""
-        parser = ArgumentParser(
-            parents=[parent_parser], add_help=False, conflict_handler="resolve"
-        )
-        parser.add_argument("--pretrained_model_name_or_path", type=str, default="gpt2")
-        parser.add_argument(
-            "--pretrained",
-            type=bool,
-            default=True,
-            help="Load pretrained weights or not.",
-        )
-
-        # Model specific
-        parser.add_argument("--embd_pdrob", type=float, default=None)
-        parser.add_argument("--attn_pdrob", type=float, default=None)
-        parser.add_argument("--resid_pdrob", type=float, default=None)
-        parser.add_argument("--n_head", type=int, default=None)
-        parser.add_argument("--n_layer", type=int, default=None)
-        parser.add_argument("--n_embd", type=int, default=None)
-        parser.add_argument("--activation_function", type=str, default=None)
-
-        # TurnGPT specific
-        parser.add_argument(
-            "--omit_dialog_states",
-            action="store_true",
-            help="To omit dialog-states in transformer embedding",
-        )
-        parser.add_argument("--trp_projection_steps", default=-1, type=int)
-        parser.add_argument(
-            "--no_train_first_n",
-            default=-1,
-            type=int,
-            help="Don't train on the n first tokens.",
-        )
-        parser.add_argument(
-            "--trp_projection_type",
-            default="linear",
-            type=str,
-            help="'Linear' or 'Attention'",
-        )
-
-        # Training
-        parser.add_argument(
-            "--dropout",
-            default=None,
-            type=float,
-            help="Set to None which uses the values in the original config.json",
-        )
-        parser.add_argument("--learning_rate", default=6.25e-5, type=float)
-        parser.add_argument("--weight_loss", action="store_true")
-        parser.add_argument("--weight_eos_token", type=float, default=1.0)
-        parser.add_argument("--weight_regular_token", type=float, default=0.5)
-        return parser
-
 
 if __name__ == "__main__":
     from os.path import join
