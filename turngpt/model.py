@@ -5,17 +5,15 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import wandb
 from lightning.pytorch.callbacks import Callback
 from transformers import GPT2Config, GPT2LMHeadModel
 from transformers.models.gpt2.modeling_gpt2 import GPT2DoubleHeadsModelOutput
 
+import wandb
 from turngpt.generation import generate
 from turngpt.plot_utils import plot_trp
 from turngpt.projection_labeler import ProjectionLabeler
 from turngpt.tokenizer import SpokenDialogTokenizer
-
-mpl.use("agg")
 
 
 def load_transformer(

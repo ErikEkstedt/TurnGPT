@@ -14,6 +14,8 @@ environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
 PROJECT = "TurnGPT"
 SAVE_DIR = "runs/TurnGPT"
 
+mpl.use("agg")
+
 
 class LoggerSaveConfigCallback(SaveConfigCallback):
     def save_config(
