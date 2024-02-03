@@ -95,10 +95,11 @@ class Utils:
 
     def get_tokens(self, input_ids):
         def inner(input_ids):
-            inner_tokens = []
-            for idx in input_ids:
-                inner_tokens.append(self.idx_to_string(idx))
-            return inner_tokens
+            # inner_tokens = []
+            # for idx in input_ids:
+            #     inner_tokens.append(self.idx_to_string(idx))
+            # return inner_tokens
+            return self.idx_to_string(input_ids)
 
         def outer(input_ids):
             tokens = []

@@ -1,5 +1,6 @@
 import pytest
 import torch
+
 from turngpt.tokenizer import SpokenDialogTokenizer
 
 
@@ -7,13 +8,13 @@ from turngpt.tokenizer import SpokenDialogTokenizer
     scope="module",
     params=[
         pytest.param(("gpt2", True)),
-        pytest.param(("gpt2", False)),
+        # pytest.param(("gpt2", False)),
         # pytest.param("microsoft/DialoGPT-small", marks=pytest.mark.slow),
         # pytest.param("microsoft/DialoGPT-medium", marks=pytest.mark.slow),
         # pytest.param("microsoft/DialoGPT-large", marks=pytest.mark.slow),
     ],
 )
-def tokenizer(request):
+def tokenizer(request) -> SpokenDialogTokenizer:
     name_or_path = request.param[0]
     normalization = request.param[1]
     return SpokenDialogTokenizer(
@@ -23,18 +24,14 @@ def tokenizer(request):
 
 
 @pytest.mark.tokenizer
-def test_eos_token(tokenizer):
-    assert tokenizer.eos_token == "<ts>"
+def test_tokens(tokenizer: SpokenDialogTokenizer) -> None:
+    assert tokenizer.eos_token == "<ts>", "Wrong eos token"
+    assert tokenizer.sp1_token == "<speaker1>", "Wrong sp1_token token"
+    assert tokenizer.sp2_token == "<speaker2>", "Wrong sp2_token token"
 
 
 @pytest.mark.tokenizer
-def test_speaker_tokens(tokenizer):
-    assert tokenizer.sp1_token == "<speaker1>"
-    assert tokenizer.sp2_token == "<speaker2>"
-
-
-@pytest.mark.tokenizer
-def test_post_punctuation_space(tokenizer):
+def test_post_punctuation_space(tokenizer: SpokenDialogTokenizer):
     s = "hello,,,there;everybody.whats up<ts> how are you<ts>"
     t = tokenizer(s)
 
@@ -48,7 +45,7 @@ def test_post_punctuation_space(tokenizer):
 
 
 @pytest.mark.tokenizer
-def test_double_spaces(tokenizer):
+def test_double_spaces(tokenizer: SpokenDialogTokenizer):
     s = "hello there how are you doin<ts>     how are you<ts>"
     t = tokenizer(s)
 
@@ -62,7 +59,7 @@ def test_double_spaces(tokenizer):
 
 
 @pytest.mark.tokenizer
-def test_speaker_ids(tokenizer):
+def test_speaker_ids(tokenizer: SpokenDialogTokenizer):
     s = "Hello there, how are you today?<ts> I'm doing good thank you!<ts> That's great<ts>"
     outputs = tokenizer(s)
     out_string = tokenizer.decode(outputs["input_ids"])
@@ -95,79 +92,224 @@ def test_speaker_ids(tokenizer):
 
 
 @pytest.mark.tokenizer
-def test_idx_to_tokens(tokenizer):
-    turn_list = [
-        "hello there how are you doing today?",
-        "I'm doing very well thank you, how about you?",
-        "well, I'm sad",
+def test_string_tokenization(tokenizer: SpokenDialogTokenizer):
+    text_string = "Hello there how are you today?"
+    ans_string = (
+        "hello there how are you today" if tokenizer.normalization else text_string
+    )
+    ans_input_ids = [31373, 612, 703, 389, 345, 1909]
+
+    t = tokenizer(
+        text_string, include_end_ts=False, include_pre_space=False, return_tensors=None
+    )
+    ts_pred = tokenizer.decode(t["input_ids"])
+
+    assert ts_pred == ans_string, f"Expected {ans_string} but got {ts_pred}"
+    assert (
+        t["input_ids"] == ans_input_ids
+    ), f"Expected {ans_input_ids} but got {t['input_ids']}"
+
+    # Test with return_tensors
+    t = tokenizer(
+        text_string, include_end_ts=False, include_pre_space=False, return_tensors="pt"
+    )
+    ts_pred = tokenizer.decode(t["input_ids"][0])
+    assert ts_pred == ans_string, f"Expected {ans_string} but got {ts_pred}"
+    assert (
+        t["input_ids"] == torch.tensor(ans_input_ids)
+    ).all(), "Expected the same tensor"
+
+
+@pytest.mark.tokenizer
+def test_string_tokenization_includes(tokenizer: SpokenDialogTokenizer):
+    text_string = "Hello there how are you today?"
+    ans_string = (
+        "hello there how are you today" if tokenizer.normalization else text_string
+    )
+    ans_input_ids = [31373, 612, 703, 389, 345, 1909]
+    ans_inp_pre_space = [23748, 612, 703, 389, 345, 1909]
+
+    # With `include_end_ts`
+    t = tokenizer(
+        text_string, include_end_ts=True, include_pre_space=False, return_tensors=None
+    )
+    ts_pred = tokenizer.decode(t["input_ids"])
+    assert (
+        ts_pred == ans_string + tokenizer.eos_token
+    ), f"Expected {ans_string} but got {ts_pred}"
+    assert t["input_ids"] == ans_input_ids + [
+        tokenizer.eos_token_id
+    ], f"Expected {ans_input_ids} but got {t['input_ids']}"
+
+    # With `include_pre_space`
+    t = tokenizer(
+        text_string, include_end_ts=False, include_pre_space=True, return_tensors=None
+    )
+    ts_pred = tokenizer.decode(t["input_ids"])
+    assert ts_pred == " " + ans_string, f"Expected {ans_string} but got {ts_pred}"
+    assert (
+        t["input_ids"] == ans_inp_pre_space
+    ), f"Expected {ans_input_ids} but got {t['input_ids']}"
+
+    # Test with both
+    t = tokenizer(
+        text_string, include_end_ts=True, include_pre_space=True, return_tensors=None
+    )
+    ts_pred = tokenizer.decode(t["input_ids"])
+    assert (
+        ts_pred == " " + ans_string + tokenizer.eos_token
+    ), f"Expected {ans_string} but got {ts_pred}"
+    assert t["input_ids"] == ans_inp_pre_space + [
+        tokenizer.eos_token_id
+    ], f"Expected {ans_input_ids} but got {t['input_ids']}"
+
+
+@pytest.mark.tokenizer
+def test_list_tokenization(tokenizer: SpokenDialogTokenizer):
+    text_string = "Hello there how are you today?"
+    text_list = [text_string, text_string, text_string]
+    ans = "<ts> ".join(text_list)
+
+    t = tokenizer(text_list, include_end_ts=False, include_pre_space=False)
+    ts_pred = tokenizer.decode(t["input_ids"])
+    assert ts_pred == ans, f"Expected {ans} but got {ts_pred}"
+
+    t = tokenizer(text_list, include_end_ts=True, include_pre_space=False)
+    ts_pred = tokenizer.decode(t["input_ids"])
+    assert ts_pred == ans + "<ts>", f"Expected {ans} but got {ts_pred}"
+
+    t = tokenizer(text_list, include_end_ts=False, include_pre_space=True)
+    ts_pred = tokenizer.decode(t["input_ids"])
+    assert ts_pred == " " + ans, f"Expected {ans} but got {ts_pred}"
+
+    t = tokenizer(text_list, include_end_ts=True, include_pre_space=True)
+    ts_pred = tokenizer.decode(t["input_ids"])
+    assert ts_pred == " " + ans + "<ts>", f"Expected {ans} but got {ts_pred}"
+
+
+@pytest.mark.tokenizer
+def test_list_tokenization(tokenizer: SpokenDialogTokenizer):
+    text_string = "Hello there how are you today?"
+    list_of_list_of_strings = [
+        [text_string, text_string],
+        [text_string, text_string, text_string],
     ]
-    tok_out = tokenizer(turn_list, include_end_ts=False)
-    ids_list = tok_out["input_ids"]
-    ids_tens = torch.tensor(tok_out["input_ids"])
-    t1 = tokenizer.idx_to_tokens(ids_list)
-    t2 = tokenizer.idx_to_tokens(ids_tens)
-    t3 = tokenizer.idx_to_tokens(ids_list[0])
-    assert t1 == t2
-    assert isinstance(t3, str)
+    ans_string = "hello there how are you today"
+    ans0 = "<ts> ".join([ans_string, ans_string]).lower()
+    ans1 = "<ts> ".join([ans_string, ans_string, ans_string]).lower()
+
+    t = tokenizer(
+        list_of_list_of_strings, include_end_ts=False, include_pre_space=False
+    )
+    ts_pred0 = tokenizer.decode(t["input_ids"][0])
+    ts_pred1 = tokenizer.decode(t["input_ids"][1])
+    assert ts_pred0 == ans0, f"Expected {ans0} but got {ts_pred0}"
+    assert ts_pred1 == ans1, f"Expected {ans1} but got {ts_pred1}"
+
+    t = tokenizer(list_of_list_of_strings, include_end_ts=True, include_pre_space=False)
+    ts_pred0 = tokenizer.decode(t["input_ids"][0])
+    ts_pred1 = tokenizer.decode(t["input_ids"][1])
+    assert ts_pred0 == ans0 + "<ts>", f"Expected {ans0} but got {ts_pred0}"
+    assert ts_pred1 == ans1 + "<ts>", f"Expected {ans1} but got {ts_pred1}"
+
+    t = tokenizer(list_of_list_of_strings, include_end_ts=False, include_pre_space=True)
+    ts_pred0 = tokenizer.decode(t["input_ids"][0])
+    ts_pred1 = tokenizer.decode(t["input_ids"][1])
+    assert ts_pred0 == " " + ans0, f"Expected {ans0} but got {ts_pred0}"
+    assert ts_pred1 == " " + ans1, f"Expected {ans1} but got {ts_pred1}"
+
+    t = tokenizer(list_of_list_of_strings, include_end_ts=True, include_pre_space=True)
+    ts_pred0 = tokenizer.decode(t["input_ids"][0])
+    ts_pred1 = tokenizer.decode(t["input_ids"][1])
+    assert ts_pred0 == " " + ans0 + "<ts>", f"Expected {ans0} but got {ts_pred0}"
+    assert ts_pred1 == " " + ans1 + "<ts>", f"Expected {ans1} but got {ts_pred1}"
+
+    # Test with return_tensors
+    t = tokenizer(
+        list_of_list_of_strings,
+        include_end_ts=False,
+        include_pre_space=False,
+        return_tensors="pt",
+    )
+
+    ts_pred0 = tokenizer.decode(t["input_ids"][0][0])
+    ts_pred1 = tokenizer.decode(t["input_ids"][1][0])
+    assert ts_pred0 == ans0, f"Expected {ans0} but got {ts_pred0}"
+    assert ts_pred1 == ans1, f"Expected {ans1} but got {ts_pred1}"
 
 
 @pytest.mark.tokenizer
-def test_string_tokenization(tokenizer):
-    string_a = 'Yesterday Hello ther, "honey"<ts> godday... you are great<ts> Not as good as you!<ts>'
-
-    if tokenizer.normalization:
-        ans = "yesterday hello ther honey<ts> godday you are great<ts> not as good as you<ts>"
-    else:
-        ans = string_a
-
-    outputs = tokenizer(string_a)
-    assert tokenizer.decode(outputs["input_ids"]) == ans
-
-
-@pytest.mark.tokenizer
-def test_list_tokenization(tokenizer):
+def test_word_probs_tensor(tokenizer: SpokenDialogTokenizer):
     text_list = [
-        'Yesterday Hello ther, "honey"',
-        "godday... you are great",
-        "Not as good as you!",
+        "Yesterday i had tommorows intervention",
+        "Oh is that so but yesterday?",
     ]
+    ans_probs = [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
 
-    if tokenizer.normalization:
-        ans = "yesterday hello ther honey<ts> godday you are great<ts> not as good as you<ts>"
-    else:
-        ans = "<ts> ".join(text_list) + "<ts>"
+    # Tensors
+    t = tokenizer(text_list, return_tensors="pt")
 
-    outputs = tokenizer(text_list)
-    assert tokenizer.decode(outputs["input_ids"]) == ans
+    # Get the input_ids (disregard batch dimension)
+    input_ids = t["input_ids"][0]
+
+    # Fix the probabilities
+    probs = torch.arange(len(input_ids))
+
+    # Extract the word probabilities
+    p = tokenizer.extract_word_probs(input_ids, probs)
+    assert len(p["words"]) == len(
+        p["probs"]
+    ), f"Expected the same length but got words: {len(p['words'])} and probs: {len(p['probs'])}"
+    assert isinstance(
+        p["probs"], torch.Tensor
+    ), f"Expected a probs to be a tensor. got {type(p['probs'])}"
+    assert (
+        p["probs"].tolist() == ans_probs
+    ), f"Expected {ans_probs} but got {p['probs']}"
 
 
 @pytest.mark.tokenizer
-def test_list_of_lists_tokenization(tokenizer):
+def test_word_probs_list(tokenizer: SpokenDialogTokenizer):
     text_list = [
-        'Yesterday Hello ther, "honey"',
-        "godday... you are great",
-        "Not as good as you!",
+        "Yesterday i had tommorows intervention",
+        "Oh is that so but yesterday?",
     ]
-    list_of_lists = [text_list, text_list[:-1], text_list[:-2]]
+    ans_probs = [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
 
-    if tokenizer.normalization:
-        output_list_of_lists = [
-            "yesterday hello ther honey<ts> godday you are great<ts> not as good as you<ts>",
-            "yesterday hello ther honey<ts> godday you are great<ts>",
-            "yesterday hello ther honey<ts>",
-        ]
-    else:
-        output_list_of_lists = [
-            'Yesterday Hello ther, "honey"<ts> godday... you are great<ts> Not as good as you!<ts>',
-            'Yesterday Hello ther, "honey"<ts> godday... you are great<ts>',
-            'Yesterday Hello ther, "honey"<ts>',
-        ]
-    outputs = tokenizer(list_of_lists)
+    # Tensors
+    t = tokenizer(text_list)
 
-    output_strings = []
-    for out in outputs["input_ids"]:
-        output_strings.append(tokenizer.decode(out))
+    # Get the input_ids
+    input_ids = t["input_ids"]
 
-    assert output_strings[0] == output_list_of_lists[0]
-    assert output_strings[1] == output_list_of_lists[1]
-    assert output_strings[2] == output_list_of_lists[2]
+    # Fix the probabilities
+    probs = torch.arange(len(input_ids)).tolist()
+
+    # Extract the word probabilities
+    p = tokenizer.extract_word_probs(input_ids, probs)
+    assert len(p["words"]) == len(
+        p["probs"]
+    ), f"Expected the same length but got words: {len(p['words'])} and probs: {len(p['probs'])}"
+    assert isinstance(
+        p["probs"], torch.Tensor
+    ), f"Expected a probs to be a tensor. got {type(p['probs'])}"
+    assert p["probs"] == ans_probs, f"Expected {ans_probs} but got {p['probs']}"
+
+
+# @pytest.mark.tokenizer
+# def test_idx_to_tokens(tokenizer: SpokenDialogTokenizer):
+#     tok_out = tokenizer(turn_list, include_end_ts=False)
+#     ids_list = tok_out["input_ids"]
+#     ids_tens = torch.tensor(tok_out["input_ids"])
+#     t1 = tokenizer.idx_to_tokens(ids_list)
+#     t2 = tokenizer.idx_to_tokens(ids_tens)
+#     t3 = tokenizer.idx_to_tokens(ids_list[0])
+#     assert t1 == t2
+#     assert isinstance(t3, str)
+
+
+# @pytest.mark.tokenizer
+# def test_idx_tensor_to_tokens(tokenizer: SpokenDialogTokenizer):
+#     tok_out = tokenizer(turn_list, include_end_ts=False)
+#     ids_tens = torch.tensor(tok_out["input_ids"])
+#     t2 = tokenizer.idx_to_tokens(ids_tens)

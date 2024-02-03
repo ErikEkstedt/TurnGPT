@@ -1,22 +1,20 @@
+import logging
+import re
+from typing import List, Union
+
+import torch
 from tokenizers import Regex
 from tokenizers.normalizers import (
-    Lowercase,
     NFD,
-    StripAccents,
+    Lowercase,
     Replace,
-    Strip,
     Sequence,
+    Strip,
+    StripAccents,
 )
 from transformers import AutoTokenizer
-from transformers.tokenization_utils_base import BatchEncoding
-from typing import List, Union
-import torch
-import re
-
-import logging
 
 logger = logging.getLogger(__name__)
-
 TS_TOKENS = {
     "eos_token": "<ts>",
     "pad_token": "<|endoftext|>",
@@ -32,11 +30,11 @@ class SpokenNormalizer:
     def __init__(self):
         self.normalizer = SpokenNormalizer.build_normalizer()
 
-    def normalize_string(self, s):
+    def normalize_string(self, s: str) -> str:
         s = self.add_whitespace_after_punctuation(s)
         return self.normalizer.normalize_str(s)
 
-    def add_whitespace_after_punctuation(self, s):
+    def add_whitespace_after_punctuation(self, s: str) -> str:
         """
         Don't know how to do this with the `tokenizers` library.
         So simple regexp for now...
@@ -117,10 +115,10 @@ class SpokenDialogTokenizer(SpokenNormalizer):
     """
 
     MODELS = [
+        "gpt2",
         "microsoft/DialoGPT-small",
         "microsoft/DialoGPT-medium",
         "microsoft/DialoGPT-large",
-        "gpt2",
     ]
 
     @property
@@ -168,95 +166,72 @@ class SpokenDialogTokenizer(SpokenNormalizer):
             s += f"\t{k}: {v}\n"
         logger.info(s)
 
-        # Turn-shift Token (eos_token)
-        # self.eos_token = self._tokenizer.eos_token
-        # self.eos_token_id = self._tokenizer.eos_token_id
-        # self.unk_token = self._tokenizer.unk_token
-        # self.unk_token_id = self._tokenizer.unk_token_id
-
         # Speaker Tokens
         self.sp1_token = TS_TOKENS["additional_special_tokens"][0]
         self.sp2_token = TS_TOKENS["additional_special_tokens"][1]
         self.sp1_token_id = self._tokenizer.convert_tokens_to_ids(self.sp1_token)
         self.sp2_token_id = self._tokenizer.convert_tokens_to_ids(self.sp2_token)
 
-    def __repr__(self):
+        self.new_word_char = "Ġ"
+
+    def __repr__(self) -> str:
         return self._tokenizer.__repr__()
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._tokenizer)
+
+    def pad(self, *args, **kwargs):
+        return self._tokenizer.pad(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        return self._tokenizer.decode(*args, **kwargs)
+
+    def convert_ids_to_tokens(self, *args, **kwargs):
+        return self._tokenizer.convert_ids_to_tokens(*args, **kwargs)
+
+    def convert_tokens_to_ids(self, *args, **kwargs):
+        return self._tokenizer.convert_tokens_to_ids(*args, **kwargs)
+
+    def convert_tokens_to_string(self, *args, **kwargs):
+        return self._tokenizer.convert_tokens_to_string(*args, **kwargs).strip()
+
+    #######################################################################################
 
     def normalize(self, string: str) -> str:
         if self.normalization:
             return self.normalize_string(string)
         return string
 
-    def __call__(
-        self,
-        text: Union[str, List[str], List[List[str]]],
-        return_token_type_ids: bool = True,
-        include_pre_space: bool = False,
-        include_end_ts: bool = True,
-        **kwargs,
-    ) -> BatchEncoding:
-        """
-        SpokenDialogTokenizer tokenization.
+    def _is_list_of_lists(self, text) -> bool:
+        return isinstance(text, list) and isinstance(text[0], list)
 
-        `text` can be either a String, a List of Strings, or a List of Lists of Strings. The behaviour of
-        this function depends on the `single_dialog` flag.
+    def _is_list_of_strings(self, data: Union[str, List[str], List[List[str]]]) -> bool:
+        return isinstance(data, list) and all(isinstance(item, str) for item in data)
 
-        `text` is String:           representation of entire dialog (including eos_token)
-        `text` is List[str]:        representation of turns in a dialog (no eos_tokens)
-        `text` is List[List[str]]:  multiple dialogs (lists of strings) (no eos_tokens)
+    def format_string(
+        self, text: str, include_end_ts: bool, include_pre_space: bool
+    ) -> str:
+        text = self.normalize(text)
+        if include_pre_space and not text.startswith(" "):
+            text = " " + text
+        if include_end_ts and not text.endswith(self.eos_token):
+            text += self.eos_token
+        return text
 
-        """
-
-        # List of lists
-        if isinstance(text, list) and isinstance(text[0], list):
-            ret = {}
-            for text_list in text:
-                o = self(
-                    text_list,
-                    include_pre_space=include_pre_space,
-                    include_end_ts=include_end_ts,
-                )
-
-                for k, v in o.items():
-                    if not k in ret:
-                        ret[k] = []
-                    ret[k].append(v)
-            return ret
-
-        # List of strings, a dialog: ['hello', 'hello to you']
-        elif isinstance(text, List):
-            dialog_string = ""
-            if include_pre_space:
-                dialog_string = " "
-            dialog_string += self.normalize(text[0])
-            if len(text) > 1:
-                dialog_string += self.eos_token
-                for text_string in text[1:-1]:
-                    dialog_string += " " + self.normalize(text_string) + self.eos_token
-                dialog_string += " " + self.normalize(text[-1])
-            if include_end_ts:
-                dialog_string += self.eos_token
-            text = dialog_string
-        else:
-            text = self.normalize(text)
-
-        encoding = self._tokenizer(
-            text=text,
-            **kwargs,
+    def format_list_of_strings(
+        self, list_of_strings: List[str], include_end_ts: bool, include_pre_space: bool
+    ) -> str:
+        text_string = f"{self.eos_token} ".join(list_of_strings)
+        return self.format_string(
+            text_string,
+            include_end_ts=include_end_ts,
+            include_pre_space=include_pre_space,
         )
 
-        if return_token_type_ids:
-            encoding["speaker_ids"] = self._extract_speaker_states(
-                encoding["input_ids"]
-            )
-        return encoding
-
     def _extract_speaker_states(self, input_ids):
-        # extract speaker states
+        """
+        extract speaker states
+        """
         back_to_list = False
         if not isinstance(input_ids, torch.Tensor):
             input_ids = torch.tensor(input_ids).unsqueeze(0)  # with batch dim
@@ -270,6 +245,7 @@ class SpokenDialogTokenizer(SpokenNormalizer):
                 speaker_ids[b, eos_idx + 1 :] = self.sp2_token_id
             else:
                 start = tmp_eos[0]
+                i = 0
                 for i, eos in enumerate(tmp_eos[1:]):
                     if i % 2 == 0:
                         sp = self.sp2_token_id
@@ -286,39 +262,189 @@ class SpokenDialogTokenizer(SpokenNormalizer):
         return speaker_ids
 
     def idx_to_tokens(self, ids):
+        """"""
+
         def list_ids_to_string(ids):
-            return [
-                self.convert_tokens_to_string(t)
-                for t in self.convert_ids_to_tokens(ids)
-            ]
+            return self.convert_tokens_to_string(self.convert_ids_to_tokens(ids))
 
         # tokenize keep tokens
         if isinstance(ids, torch.Tensor):
             ids = ids.tolist()
 
+        if isinstance(ids, int):
+            ids = [ids]
+
         if isinstance(ids, list):
             if isinstance(ids[0], list):
                 ret = [list_ids_to_string(ids_list) for ids_list in ids]
             else:
-                ret = list_ids_to_string(ids)
+                ret = self.convert_tokens_to_string(self.convert_ids_to_tokens(ids))
         else:
             ret = self.convert_tokens_to_string(self.convert_ids_to_tokens(ids))
         return ret
 
-    def pad(self, *args, **kwargs):
-        return self._tokenizer.pad(*args, **kwargs)
+    def extract_word_probs(self, input_ids, probs):
+        """ """
 
-    def decode(self, *args, **kwargs):
-        return self._tokenizer.decode(*args, **kwargs)
+        is_tensor = False
+        if isinstance(input_ids, torch.Tensor):
+            assert input_ids.ndim == 1, f"input_ids must be 1D. Got {input_ids.ndim}"
 
-    def convert_ids_to_tokens(self, *args, **kwargs):
-        return self._tokenizer.convert_ids_to_tokens(*args, **kwargs)
+        if isinstance(input_ids, list):
+            assert isinstance(input_ids[0], int), "input_ids must be 1D list of ints"
 
-    def convert_tokens_to_ids(self, *args, **kwargs):
-        return self._tokenizer.convert_tokens_to_ids(*args, **kwargs)
+        if isinstance(probs, torch.Tensor):
+            assert probs.ndim == 1, f"probs must be 1D. Got {probs.ndim}"
+            is_tensor = True
 
-    def convert_tokens_to_string(self, *args, **kwargs):
-        return self._tokenizer.convert_tokens_to_string(*args, **kwargs).strip()
+        if isinstance(probs, list):
+            assert isinstance(
+                probs[0], (float, int)
+            ), "input_ids must be 1D list of floats"
+
+        tok_list = self.convert_ids_to_tokens(input_ids)
+        words = [tok_list[0]]
+        p_words = [probs[0]]
+        for i in range(1, len(tok_list)):
+            if (
+                tok_list[i].startswith(self.new_word_char)
+                or tok_list[i] == self.eos_token
+            ):
+                p_words.append(probs[i])
+                words.append(tok_list[i].replace(self.new_word_char, ""))
+            else:
+                p_words[-1] = max(p_words[-1], probs[i])
+                words[-1] += tok_list[i].replace(self.new_word_char, "")
+
+        if is_tensor:
+            p_words = torch.tensor(p_words)
+        return {"words": words, "probs": p_words}
+
+    def __call__(
+        self,
+        text: Union[str, List[str], List[List[str]]],
+        return_token_type_ids: bool = True,
+        include_pre_space: bool = False,
+        include_end_ts: bool = True,
+        **kwargs,
+    ):
+        """
+        SpokenDialogTokenizer tokenization.
+
+        `text` can be either a String, a List of Strings, or a List of Lists of Strings. The behaviour of
+        this function depends on the `single_dialog` flag.
+
+        `text` is String:           representation of entire dialog (including eos_token)
+        `text` is List[str]:        representation of turns in a dialog (no eos_tokens)
+        `text` is List[List[str]]:  multiple dialogs (lists of strings) (no eos_tokens)
+        """
+        if self._is_list_of_lists(text):
+            # Checks for a list of lists
+            ret = {}
+            for list_of_strings in text:
+                o = self(
+                    list_of_strings,
+                    include_pre_space=include_pre_space,
+                    include_end_ts=include_end_ts,
+                    **kwargs,
+                )
+                for k, v in o.items():
+                    if k not in ret:
+                        ret[k] = []
+                    ret[k].append(v)
+            return ret
+
+        if self._is_list_of_strings(text):
+            text = self.format_list_of_strings(
+                text, include_end_ts=include_end_ts, include_pre_space=include_pre_space
+            )
+        elif isinstance(text, str):
+            text = self.format_string(
+                text, include_end_ts=include_end_ts, include_pre_space=include_pre_space
+            )
+        else:
+            raise ValueError(
+                f"Invalid input type: {type(text)}. Expects: str, List[str], List[List[str]]"
+            )
+
+        # Encoder the string
+        encoding = self._tokenizer(text=text, **kwargs)
+
+        # Extract speaker_ids
+        if return_token_type_ids:
+            encoding["speaker_ids"] = self._extract_speaker_states(
+                encoding["input_ids"]
+            )
+        return encoding
+
+
+def original_tokenizer():
+    T1 = AutoTokenizer.from_pretrained("gpt2", max_model_input_sizes=None)
+    T2 = SpokenDialogTokenizer("gpt2")
+    text = "Hello how are u"
+    inp1 = T1(text)["input_ids"]
+    inp2 = T2(text)["input_ids"]
+    print("words: ", len(text.split()))
+    print("text: ", text)
+    print("inp1: ", len(inp1), inp1)
+    print("inp2: ", len(inp2), inp2)
+    t1 = T1.convert_ids_to_tokens(inp1)
+    t2 = T2.convert_ids_to_tokens(inp2)
+    i1 = T1.convert_tokens_to_ids(t1)
+    i2 = T2.convert_tokens_to_ids(t2)
+    it1 = T1.convert_tokens_to_string(t1)
+    it2 = T2.convert_tokens_to_string(t2)
+    print("t1: ", t1)
+    print("t2: ", t2)
+    print("i1: ", i1)
+    print("i2: ", i2)
+    print("it1: ", it1)
+    print("it2: ", it2)
+
+
+def test():
+
+    text_string = "hello there how are you today?"
+    ans_string_inp = [31373, 612, 703, 389, 345, 1909]
+    tokenizer = SpokenDialogTokenizer("gpt2")
+
+    t = tokenizer([text_string, text_string], return_tensors="pt")
+
+    t = tokenizer([text_string, text_string], return_tensors="pt")
+
+    text_string = "Yesterday i had tommorows intervention"
+    # text_string = "hello there how are you today?"
+    #
+    t = tokenizer(
+        ["Yesterday i had tommorows intervention", "Oh is that so but yesterday?"],
+        return_tensors="pt",
+    )
+    input_ids = t["input_ids"][0]
+    probs = torch.arange(t["input_ids"].shape[-1])
+    print("input_ids: ", input_ids)
+    print("probs: ", probs)
+    wp = tokenizer.extract_word_probs(t["input_ids"][0], probs)
+    print(wp["words"])
+    print(wp["probs"])
+
+    tok = tokenizer.idx_to_tokens(612)
+    tok = tokenizer.idx_to_tokens([612])
+    tok = tokenizer.idx_to_tokens([612, 703])
+
+    # encode a string
+    t = tokenizer(
+        text_string,
+        return_token_type_ids=False,
+        include_pre_space=False,
+        include_end_ts=True,
+    )
+    print(t["input_ids"])
+
+    print(t["input_ids"] == ans_string_inp)
+
+    # Encode a list of strings
+    t = tokenizer([text_string])
+    print(t["input_ids"] == ans_string_inp)
 
 
 if __name__ == "__main__":
@@ -347,15 +473,13 @@ if __name__ == "__main__":
     print(tokenizer.decode(outputs["input_ids"]))
     print(outputs["speaker_ids"])
 
-    outputs["speaker"]
-
     turn_list = [
         "hello there how are you doing today?",
         "I'm doing very well thank you, how about you?",
         "well, I'm sad",
     ]
 
-    i = tokenizer(turn_list, include_end_ts=False, include_pre_space=True)["input_ids"]
+    i = tokenizer(turn_list, include_end_ts=False, include_pre_space=False)["input_ids"]
     d = tokenizer.decode(i)
 
     very_long_string = ""
