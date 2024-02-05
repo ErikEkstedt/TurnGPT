@@ -547,17 +547,18 @@ class TurnGPT(L.LightningModule, Utils):
 
     def on_load_checkpoint(self, checkpoint):
         """We must load the tokenizer used during training and resize the embeddings appropriately"""
-        if "tokenizer" in checkpoint:
-            print("#" * 70)
-            print("LOAD CHECKPOINT TOKENIZER")
-            self.tokenizer = checkpoint["tokenizer"]
-            print("Loaded tokenizer")
-            print(self.tokenizer)
-
-            # Add extra embeddings for custom tokens
-            self.transformer.resize_token_embeddings(new_num_tokens=len(self.tokenizer))
-            print("Resized weights")
-            print("#" * 70)
+        self.init_tokenizer()
+        # if "tokenizer" in checkpoint:
+        #     print("#" * 70)
+        #     print("LOAD CHECKPOINT TOKENIZER")
+        #     self.tokenizer = checkpoint["tokenizer"]
+        #     print("Loaded tokenizer")
+        #     print(self.tokenizer)
+        #
+        #     # Add extra embeddings for custom tokens
+        #     self.transformer.resize_token_embeddings(new_num_tokens=len(self.tokenizer))
+        #     print("Resized weights")
+        #     print("#" * 70)
 
     def training_step(self, batch, batch_idx):
         lm_labels = self.get_labels(batch["input_ids"], mask=batch["attention_mask"])
@@ -617,13 +618,18 @@ class TurnGPT(L.LightningModule, Utils):
 
 
 def test():
+
     checkpoint = "checkpoints/turngpt_epoch=11_val_loss=0.6381.ckpt"
-    model = TurnGPT.load_from_checkpoint(checkpoint).eval()
-    model.tokenizer = SpokenDialogTokenizer("gpt2")
+    checkpoint = "checkpoint/turngpt_l9eniez4_epoch=0_val_loss=0.7564.ckpt"
+    # checkpoint = "runs/TurnGPT/TurnGPT_1fsd1oan/epoch=6_val_loss=2.6804.ckpt"
+    model = TurnGPT.load_from_checkpoint(checkpoint, map_location="cpu").eval()
+
+    if torch.cuda.is_available():
+        model = model.to("cuda")
 
     text_list = [
-        "Hello there, how are you doing",
-        "I'm fine tell me about",
+        "Hello there, what's up?",
+        "I'm fine tell me about maths",
     ]
     # TRP word probabilities
     t = model.tokenizer(text_list, include_end_ts=False)  # , return_tensors="pt")
@@ -643,19 +649,22 @@ def test():
     gen = generate(
         model,
         context=text_list,
-        n_steps=5,
+        n_steps=3,
         top_p=0.9,
         top_k=-1,
         n_trajectories=20,
-        strategy="sample",
-        stop_at_eos=True,
+        stop_at_eos=False,
+        strategy="sampling",
     )
     print(gen.keys())
-
     n = 0
+
+    [print(u) for u in text_list]
+    print("-----------------")
     for fut in gen["tokens"]:
         if "<ts>" in fut:
             n += 1
+        print(fut)
     print(f"Found {n} <ts> in {len(gen['tokens'])} samples")
 
 

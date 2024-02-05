@@ -1,5 +1,5 @@
-import torch
 import einops
+import torch
 
 
 def expand_batch(batch, n_trajectories=1):
@@ -13,7 +13,7 @@ def expand_batch(batch, n_trajectories=1):
     return batch
 
 
-def sample_next_token(logits, top_p=-1, top_k=-1):
+def sample_next_token(logits, top_p: float = -1.0, top_k: int = -1):
     """
     Samples the next token given the probabilities over the
     """
@@ -79,17 +79,23 @@ def update_speaker_ids(batch, tokenizer):
     return next_speaker
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate_greedy(
     model,
     context,
     n_steps=20,
     stop_at_eos=False,
+    include_end_ts=False,
 ):
     """Generate by sampling"""
     # prepare input for model
-    batch = model.tokenize_strings(context)
+    batch = model.tokenizer(context, include_end_ts=include_end_ts, return_tensors="pt")
     batch["attention_mask"] = None
+
+    batch = {
+        k: v.to(model.device) if isinstance(v, torch.Tensor) else v
+        for k, v in batch.items()
+    }
 
     # keep track of everything if `use_cache` is True
     generated = {"input_ids": [], "speaker_ids": []}
@@ -143,7 +149,7 @@ def generate_greedy(
     return batch
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate_sample(
     model,
     context,
@@ -152,11 +158,12 @@ def generate_sample(
     top_k=-1,
     stop_at_eos=False,
     n_trajectories=4,
+    include_end_ts=False,
 ):
     """Generate by sampling"""
 
     # prepare input for model
-    batch = model.tokenize_strings(context)
+    batch = model.tokenizer(context, include_end_ts=include_end_ts, return_tensors="pt")
     batch["attention_mask"] = None
     # sample multiple trajectories at once
     batch = expand_batch(batch, n_trajectories)
@@ -166,7 +173,10 @@ def generate_sample(
         batch["speaker_ids"] = None
 
     # keep track of everything
-    device = batch["input_ids"].device
+    device = model.device
+    batch = {
+        k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()
+    }
     generated = {
         "input_ids": torch.empty(0, device=device, dtype=torch.long),
         "speaker_ids": torch.empty(0, device=device, dtype=torch.long),
@@ -316,6 +326,7 @@ def generate(
     top_k=-1,
     stop_at_eos=False,
     strategy="sampling",  # greedy, sampling
+    include_end_ts=False,
 ):
     if strategy.lower().startswith("s"):
         return generate_sample(
@@ -326,13 +337,21 @@ def generate(
             top_k=top_k,
             n_trajectories=n_trajectories,
             stop_at_eos=stop_at_eos,
+            include_end_ts=include_end_ts,
         )
     else:
-        return generate_greedy(model, context, n_steps=n_steps, stop_at_eos=stop_at_eos)
+        return generate_greedy(
+            model,
+            context,
+            n_steps=n_steps,
+            stop_at_eos=stop_at_eos,
+            include_end_ts=include_end_ts,
+        )
 
 
 def debug():
     from os.path import join
+
     from turngpt.model import TurnGPT
 
     # Load trained model
@@ -405,6 +424,7 @@ def debug():
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
+
     from turngpt.model import TurnGPT
 
     parser = ArgumentParser()
