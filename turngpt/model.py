@@ -1,7 +1,6 @@
 from argparse import ArgumentParser
 
 import lightning as L
-import matplotlib as mpl
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -615,6 +614,49 @@ class TurnGPT(L.LightningModule, Utils):
             total_loss = out["loss"]
 
         self.log("val_loss", total_loss)
+
+
+def test():
+    checkpoint = "checkpoints/turngpt_epoch=11_val_loss=0.6381.ckpt"
+    model = TurnGPT.load_from_checkpoint(checkpoint).eval()
+    model.tokenizer = SpokenDialogTokenizer("gpt2")
+
+    text_list = [
+        "Hello there, how are you doing",
+        "I'm fine tell me about",
+    ]
+    # TRP word probabilities
+    t = model.tokenizer(text_list, include_end_ts=False)  # , return_tensors="pt")
+    out = model(
+        torch.tensor(t["input_ids"], device=model.device),
+        torch.tensor(t["speaker_ids"], device=model.device),
+    )
+    out["probs"] = out["logits"].softmax(dim=-1)
+    out["trp_probs"] = model.get_trp(out["probs"])
+    p = model.tokenizer.extract_word_probs(t["input_ids"], out["trp_probs"])
+    for k, v in zip(p["words"], p["probs"]):
+        print(f"{k}: {v*100:.0f}%")
+
+    # Generate future + TRP
+
+    # Does seem to insert <ts> token? include_end_ts=True
+    gen = generate(
+        model,
+        context=text_list,
+        n_steps=5,
+        top_p=0.9,
+        top_k=-1,
+        n_trajectories=20,
+        strategy="sample",
+        stop_at_eos=True,
+    )
+    print(gen.keys())
+
+    n = 0
+    for fut in gen["tokens"]:
+        if "<ts>" in fut:
+            n += 1
+    print(f"Found {n} <ts> in {len(gen['tokens'])} samples")
 
 
 if __name__ == "__main__":

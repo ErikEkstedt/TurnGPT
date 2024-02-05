@@ -283,7 +283,7 @@ def test_word_probs_list(tokenizer: SpokenDialogTokenizer):
     input_ids = t["input_ids"]
 
     # Fix the probabilities
-    probs = torch.arange(len(input_ids)).tolist()
+    probs = torch.arange(len(input_ids))
 
     # Extract the word probabilities
     p = tokenizer.extract_word_probs(input_ids, probs)
@@ -293,23 +293,6 @@ def test_word_probs_list(tokenizer: SpokenDialogTokenizer):
     assert isinstance(
         p["probs"], torch.Tensor
     ), f"Expected a probs to be a tensor. got {type(p['probs'])}"
-    assert p["probs"] == ans_probs, f"Expected {ans_probs} but got {p['probs']}"
-
-
-# @pytest.mark.tokenizer
-# def test_idx_to_tokens(tokenizer: SpokenDialogTokenizer):
-#     tok_out = tokenizer(turn_list, include_end_ts=False)
-#     ids_list = tok_out["input_ids"]
-#     ids_tens = torch.tensor(tok_out["input_ids"])
-#     t1 = tokenizer.idx_to_tokens(ids_list)
-#     t2 = tokenizer.idx_to_tokens(ids_tens)
-#     t3 = tokenizer.idx_to_tokens(ids_list[0])
-#     assert t1 == t2
-#     assert isinstance(t3, str)
-
-
-# @pytest.mark.tokenizer
-# def test_idx_tensor_to_tokens(tokenizer: SpokenDialogTokenizer):
-#     tok_out = tokenizer(turn_list, include_end_ts=False)
-#     ids_tens = torch.tensor(tok_out["input_ids"])
-#     t2 = tokenizer.idx_to_tokens(ids_tens)
+    assert (
+        p["probs"].tolist() == ans_probs
+    ), f"Expected {ans_probs} but got {p['probs']}"
