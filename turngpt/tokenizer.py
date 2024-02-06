@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import List, Union
+from typing import List, Tuple, Union
 
 import torch
 from tokenizers import Regex
@@ -68,7 +68,7 @@ class SpokenNormalizer:
         return normalizer
 
 
-class SpokenDialogTokenizer(SpokenNormalizer):
+class SpokenDialogTokenizerBase(SpokenNormalizer):
     """
     A tokenizer wrapper for `AutoTokenizer.from_pretrained` which cleans/normalizes text
     strings, removes punctuations and creates `speaker_ids` (like TransferTransfo and similiar to Bert) where each utterance
@@ -195,13 +195,13 @@ class SpokenDialogTokenizer(SpokenNormalizer):
     def convert_tokens_to_string(self, *args, **kwargs):
         return self._tokenizer.convert_tokens_to_string(*args, **kwargs).strip()
 
-    #######################################################################################
-
     def normalize(self, string: str) -> str:
         if self.normalization:
             return self.normalize_string(string)
         return string
 
+
+class SpokenDialogTokenizer(SpokenDialogTokenizerBase):
     def _is_list_of_lists(self, text) -> bool:
         return isinstance(text, list) and isinstance(text[0], list)
 
@@ -320,6 +320,25 @@ class SpokenDialogTokenizer(SpokenNormalizer):
             p_words = torch.tensor(p_words)
         return {"words": words, "probs": p_words}
 
+    def word_probs_filter_last_utterance(
+        self, w: List[str], p: torch.Tensor
+    ) -> Tuple[List[str], torch.Tensor]:
+        last_ts_idx = w[::-1].index("<ts>") if self.eos_token in w else 0
+        return w[-last_ts_idx:], p[-last_ts_idx:]
+
+    def get_prefixes(self, tokens: List[str]) -> Tuple[List[int], List[str]]:
+        prefixes = []
+        n_words_left = []
+        for future in tokens:
+            n = future.split(self.eos_token)
+            user_continuation = n[0].strip()
+            n_words_left.append(len(user_continuation.split()))
+            if len(n) > 1 and n[1] != "":
+                prefix = n[1].strip()
+                prefixes.append(prefix)
+                # print(f"{i}. {user_continuation} --------- {prefix}")
+        return n_words_left, prefixes
+
     def __call__(
         self,
         text: Union[str, List[str], List[List[str]]],
@@ -407,14 +426,9 @@ def test():
     text_string = "hello there how are you today?"
     ans_string_inp = [31373, 612, 703, 389, 345, 1909]
     tokenizer = SpokenDialogTokenizer("gpt2")
-
     t = tokenizer([text_string, text_string], return_tensors="pt")
-
-    t = tokenizer([text_string, text_string], return_tensors="pt")
-
     text_string = "Yesterday i had tommorows intervention"
     # text_string = "hello there how are you today?"
-    #
     t = tokenizer(
         ["Yesterday i had tommorows intervention", "Oh is that so but yesterday?"],
         return_tensors="pt",
@@ -445,6 +459,87 @@ def test():
     # Encode a list of strings
     t = tokenizer([text_string])
     print(t["input_ids"] == ans_string_inp)
+
+    text_list = [
+        "Yesterday i had tommorows intervention",
+        "Oh is that so but yesterday?",
+        "I don't know",
+    ]
+
+    tokenizer = SpokenDialogTokenizer("gpt2")
+
+    # Use case: use the model in a SDS to infer upcoming TRPs
+    # Assume that we don't add <ts> tokens to the end of the utterances
+
+    t = tokenizer(text_list, include_end_ts=False, return_tensors="pt")  # (1, N)
+    probs = torch.arange(t["input_ids"].shape[-1]).unsqueeze(0)
+
+    wp = tokenizer.extract_word_probs(t["input_ids"].squeeze(0), probs.squeeze(0))
+    print(wp["words"])
+    print(wp["probs"])
+
+    ww, pp = tokenizer.word_probs_filter_last_utterance(wp["words"], wp["probs"])
+
+    print(ww)
+    print(pp)
+
+    context = ["Is your name Alice?", "Yes, I am she", "Okay"]
+    t = tokenizer(text_list, include_end_ts=False, return_tensors="pt")  # (1, N)
+
+    tokens = [
+        " good because I'm calling",
+        " good<ts> what do you want",
+        "<ts> what do you want",
+        "<ts> what do you want",
+    ]
+
+    def count_ts_tokens(tokens, max=-1):
+        n = 0
+        for fut in tokens:
+            if max > 0:
+                fut = " ".join(fut.split()[:max])
+            if "<ts>" in fut:
+                n += 1
+        return n
+
+    tokens = [
+        " what's going on<ts> everything",
+        " what's wrong<ts> there's",
+        " what's going on<ts> oh",
+        " what you're doing here<ts>",
+        "<ts> i don't know what",
+        " what's going on<ts> nothing",
+        " what's going on<ts> i",
+        " what's wrong<ts> i don",
+        " what's wrong<ts> i don",
+        " what's going on<ts> i",
+        " what's going on<ts> i",
+        " what's going on you look",
+        " what's going on<ts> my",
+        " what you're doing here<ts>",
+        " about yourself<ts> well i'm",
+        "<ts> i was just wondering why",
+        " what's going on<ts> there",
+        "<ts> oh just a bit of",
+        " what's going on<ts> i",
+        " what's wrong<ts> oh nothing",
+    ]
+
+    tokenizer = SpokenDialogTokenizer("gpt2")
+    nwords, prefix = tokenizer.get_prefixes(tokens)
+    N = 2
+    n = 0
+    for fut in gen["tokens"]:
+        print(fut)
+        if N > 0:
+            fut = " ".join(fut.split()[:N])
+        if tokenizer.eos_token in fut:
+            n += 1
+    print(n)
+
+    # Get prefix LM stuff
+    # Assume that it is the ongoing speech from the user
+    # Find first <ts> and the following agent utterance
 
 
 if __name__ == "__main__":

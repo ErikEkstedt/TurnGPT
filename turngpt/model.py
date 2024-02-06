@@ -541,24 +541,9 @@ class TurnGPT(L.LightningModule, Utils):
         #   https://pytorch-lightning.readthedocs.io/en/stable/common/optimizers.html#use-multiple-optimizers-like-gans-manual
         return torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
 
-    def on_save_checkpoint(self, checkpoint):
-        """We must save the tokenizer used during training"""
-        checkpoint["tokenizer"] = self.tokenizer
-
     def on_load_checkpoint(self, checkpoint):
         """We must load the tokenizer used during training and resize the embeddings appropriately"""
         self.init_tokenizer()
-        # if "tokenizer" in checkpoint:
-        #     print("#" * 70)
-        #     print("LOAD CHECKPOINT TOKENIZER")
-        #     self.tokenizer = checkpoint["tokenizer"]
-        #     print("Loaded tokenizer")
-        #     print(self.tokenizer)
-        #
-        #     # Add extra embeddings for custom tokens
-        #     self.transformer.resize_token_embeddings(new_num_tokens=len(self.tokenizer))
-        #     print("Resized weights")
-        #     print("#" * 70)
 
     def training_step(self, batch, batch_idx):
         lm_labels = self.get_labels(batch["input_ids"], mask=batch["attention_mask"])
@@ -629,43 +614,44 @@ def test():
 
     text_list = [
         "Hello there, what's up?",
-        "I'm fine tell me about maths",
+        "I'm fine tell me",
     ]
     # TRP word probabilities
-    t = model.tokenizer(text_list, include_end_ts=False)  # , return_tensors="pt")
-    out = model(
-        torch.tensor(t["input_ids"], device=model.device),
-        torch.tensor(t["speaker_ids"], device=model.device),
-    )
+    t = model.tokenizer(text_list, include_end_ts=False, return_tensors="pt")
+
+    out = model(t["input_ids"].to(model.device), t["speaker_ids"].to(model.device))
+
     out["probs"] = out["logits"].softmax(dim=-1)
     out["trp_probs"] = model.get_trp(out["probs"])
-    p = model.tokenizer.extract_word_probs(t["input_ids"], out["trp_probs"])
-    for k, v in zip(p["words"], p["probs"]):
-        print(f"{k}: {v*100:.0f}%")
+
+    for b in range(out["trp_probs"].shape[0]):
+        wp = model.tokenizer.extract_word_probs(t["input_ids"][b], out["trp_probs"][b])
+        for k, v in zip(wp["words"], wp["probs"]):
+            print(f"{k}: {v*100:.0f}%")
+        last_words, last_probs = model.tokenizer.word_probs_filter_last_utterance(
+            wp["words"], wp["probs"]
+        )
+        print("Last words: ", last_words)
+        print("Last probs: ", last_probs)
 
     # Generate future + TRP
+    tokenizer = model.tokenizer
 
     # Does seem to insert <ts> token? include_end_ts=True
     gen = generate(
         model,
         context=text_list,
-        n_steps=3,
+        n_steps=5,
         top_p=0.9,
         top_k=-1,
         n_trajectories=20,
         stop_at_eos=False,
         strategy="sampling",
     )
-    print(gen.keys())
-    n = 0
 
-    [print(u) for u in text_list]
-    print("-----------------")
-    for fut in gen["tokens"]:
-        if "<ts>" in fut:
-            n += 1
-        print(fut)
-    print(f"Found {n} <ts> in {len(gen['tokens'])} samples")
+    nwords, prefix = tokenizer.get_prefixes(gen["tokens"])
+    N = 3
+    R = (torch.tensor(nwords) <= N).sum() / len(nwords)
 
 
 if __name__ == "__main__":

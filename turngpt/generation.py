@@ -1,5 +1,8 @@
+from typing import Tuple
+
 import einops
 import torch
+from torch import Tensor
 
 
 def expand_batch(batch, n_trajectories=1):
@@ -13,50 +16,63 @@ def expand_batch(batch, n_trajectories=1):
     return batch
 
 
-def sample_next_token(logits, top_p: float = -1.0, top_k: int = -1):
-    """
-    Samples the next token given the probabilities over the
-    """
+def topk_sampling(logits: Tensor, top_k: int = 10) -> Tuple[Tensor, Tensor]:
+    probs = logits.softmax(dim=-1)
+    probs, token_idx = probs.sort(dim=-1, descending=True)
+    probs, token_idx = probs[:, :top_k], token_idx[:, :top_k]
+    p_idx = torch.multinomial(probs, num_samples=1).squeeze(1)  # B
+    prob = probs[torch.arange(len(p_idx)), p_idx]
+    tok = token_idx[torch.arange(len(p_idx)), p_idx]
+    return tok, prob
 
-    assert top_p > 0 or top_k > 0, "Either top_p or top_k > 0."
+
+def topp_sampling(
+    logits: Tensor, top_p: float = 0.9
+) -> Tuple[torch.Tensor, torch.Tensor]:
     probs = logits.softmax(dim=-1)
     probs, token_idx = probs.sort(dim=-1, descending=True)
 
-    if top_k > 0:
-        probs, token_idx = probs[:, :top_k], token_idx[:, :top_k]
-        p_idx = torch.multinomial(probs, num_samples=1).squeeze(1)  # B
-        next_prob = probs[torch.arange(len(p_idx)), p_idx]
-        next_token = token_idx[torch.arange(len(p_idx)), p_idx]
-    else:
-        pcum = probs.cumsum(dim=-1)  # cumulative probabilities
-        # cumulative less than or equal to `top_p`
-        p_batch, p_idx = torch.where(pcum <= top_p)
-        psmall = probs[p_batch, p_idx]
-        tsmall = token_idx[p_batch, p_idx]
+    pcum = probs.cumsum(dim=-1)  # cumulative probabilities
+    # cumulative less than or equal to `top_p`
+    p_batch, p_idx = torch.where(pcum <= top_p)
+    psmall = probs[p_batch, p_idx]
+    tsmall = token_idx[p_batch, p_idx]
 
-        # the cumulative probability distribution may not be of the same size
-        # so we must sample for the batches individually
-        next_token = torch.zeros(
-            (probs.shape[0]), dtype=torch.long, device=logits.device
-        )
-        next_prob = torch.zeros((probs.shape[0]), device=logits.device)
-        for n_batch in range(probs.shape[0]):
-            eq = p_batch == n_batch
-            if eq.sum() == 0:  # first token is more likely than top_p
-                next_tok = token_idx[n_batch, 0].item()
-                next_p = probs[n_batch, 0].item()
-            else:
-                p = psmall[eq]
-                t = tsmall[eq]
-                p_idx = torch.multinomial(p, num_samples=1)  # B
-                next_p = p[p_idx].item()
-                next_tok = t[p_idx].item()
-            next_token[n_batch] = next_tok
-            next_prob[n_batch] = next_p
+    # the cumulative probability distribution may not be of the same size
+    # so we must sample for the batches individually
+    next_token = torch.zeros((probs.shape[0]), dtype=torch.long, device=logits.device)
+    next_prob = torch.zeros((probs.shape[0]), device=logits.device)
+    for n_batch in range(probs.shape[0]):
+        eq = p_batch == n_batch
+        if eq.sum() == 0:  # first token is more likely than top_p
+            next_tok = token_idx[n_batch, 0].item()
+            next_p = probs[n_batch, 0].item()
+        else:
+            p = psmall[eq]
+            t = tsmall[eq]
+            p_idx = torch.multinomial(p, num_samples=1)  # B
+            next_p = p[p_idx].item()
+            next_tok = t[p_idx].item()
+        next_token[n_batch] = next_tok
+        next_prob[n_batch] = next_p
     return next_token, next_prob
 
 
-def update_speaker_ids(batch, tokenizer):
+def sample_next_token(
+    logits: Tensor, top_p: float = -1.0, top_k: int = -1
+) -> Tuple[Tensor, Tensor]:
+    """
+    Samples the next token given the probabilities over the
+    """
+    assert top_p > 0 or top_k > 0, "Either top_p or top_k > 0."
+    if top_k > 0:
+        next_token, next_prob = topk_sampling(logits, top_k)
+    else:
+        next_token, next_prob = topp_sampling(logits, top_p)
+    return next_token, next_prob
+
+
+def update_speaker_ids(batch, tokenizer) -> Tensor:
     """
     Correct Next Speaker (i.e. `token_type_ids`)
     Check for EOS-token. Don't change on EOS-token ("<ts>") but at the next step
@@ -182,11 +198,26 @@ def generate_sample(
         "speaker_ids": torch.empty(0, device=device, dtype=torch.long),
         "probs": torch.empty(0, device=device),
     }
-    completed = {"input_ids": [], "speaker_ids": [], "probs": []}
+    completed = {
+        "input_ids": [],
+        "speaker_ids": [],
+        "probs": [],
+        "trp_words": [],
+        "trp_probs": [],
+    }
 
     n = 0  # counter
     while n <= n_steps:
         out = model(**batch, use_cache=True)
+
+        if n == 0:
+            out["probs"] = out["logits"].softmax(dim=-1)
+            out["trp_probs"] = model.get_trp(out["probs"])
+            p = model.tokenizer.extract_word_probs(
+                batch["input_ids"][0], out["trp_probs"][0]
+            )
+            completed["trp_words"] = p["words"]
+            completed["trp_probs"] = p["probs"]
 
         # Sample next tokens
         # https://github.com/huggingface/transformers/blob/439a43b6b403205eeda2d62645fc16c93627d30d/src/transformers/generation_utils.py#L1373

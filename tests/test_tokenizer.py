@@ -269,15 +269,69 @@ def test_word_probs_tensor(tokenizer: SpokenDialogTokenizer):
 
 
 @pytest.mark.tokenizer
-def test_word_probs_list(tokenizer: SpokenDialogTokenizer):
-    text_list = [
-        "Yesterday i had tommorows intervention",
-        "Oh is that so but yesterday?",
-    ]
-    ans_probs = [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-
-    # Tensors
-    t = tokenizer(text_list)
+@pytest.mark.parametrize(
+    "text_list, ans_words, ans_probs",
+    [
+        (
+            [
+                "Yesterday i had tommorows intervention",
+                "Oh is that so but yesterday?",
+                "I don't know",
+            ],
+            [
+                "yesterday",
+                "i",
+                "had",
+                "tommorows",
+                "intervention",
+                "<ts>",
+                "oh",
+                "is",
+                "that",
+                "so",
+                "but",
+                "yesterday",
+                "<ts>",
+                "i",
+                "don't",
+                "know",
+            ],
+            [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20],
+        ),
+        (
+            [
+                "Yesterday i had tommorows intervention",
+                "Oh is that so but yesterday?",
+            ],
+            [
+                "yesterday",
+                "i",
+                "had",
+                "tommorows",
+                "intervention",
+                "<ts>",
+                "oh",
+                "is",
+                "that",
+                "so",
+                "but",
+                "yesterday",
+            ],
+            [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        ),
+        (
+            [
+                "Yesterday i had tommorows intervention",
+            ],
+            ["yesterday", "i", "had", "tommorows", "intervention"],
+            [1, 2, 3, 7, 8],
+        ),
+    ],
+)
+def test_word_probs_list(
+    text_list, ans_words, ans_probs, tokenizer: SpokenDialogTokenizer
+):
+    t = tokenizer(text_list, include_end_ts=False)
 
     # Get the input_ids
     input_ids = t["input_ids"]
@@ -286,13 +340,128 @@ def test_word_probs_list(tokenizer: SpokenDialogTokenizer):
     probs = torch.arange(len(input_ids))
 
     # Extract the word probabilities
-    p = tokenizer.extract_word_probs(input_ids, probs)
-    assert len(p["words"]) == len(
-        p["probs"]
-    ), f"Expected the same length but got words: {len(p['words'])} and probs: {len(p['probs'])}"
+    wp = tokenizer.extract_word_probs(input_ids, probs)
+    w, p = wp["words"], wp["probs"]
+    assert len(w) == len(
+        p
+    ), f"Expected the same length but got words: {len(w)} and probs: {len(p)}"
     assert isinstance(
-        p["probs"], torch.Tensor
-    ), f"Expected a probs to be a tensor. got {type(p['probs'])}"
+        p, torch.Tensor
+    ), f"Expected a probs to be a tensor. got {type(p)}"
+    assert p.tolist() == ans_probs, f"Expected {ans_probs} but got {p}"
+    assert w == ans_words, f"Expected {ans_words} but got {w}"
+
+
+@pytest.mark.tokenizer
+@pytest.mark.parametrize(
+    "text_list, ans_words, ans_probs",
+    [
+        (
+            [
+                "Yesterday i had tommorows intervention",
+                "Oh is that so but yesterday?",
+                "I don't know",
+            ],
+            ["i", "don't", "know"],
+            [17, 19, 20],
+        ),
+        (
+            [
+                "Yesterday i had tommorows intervention",
+                "Oh is that so but yesterday?",
+            ],
+            ["oh", "is", "that", "so", "but", "yesterday"],
+            [10, 11, 12, 13, 14, 15],
+        ),
+        (
+            [
+                "Yesterday i had tommorows intervention",
+            ],
+            ["yesterday", "i", "had", "tommorows", "intervention"],
+            [1, 2, 3, 7, 8],
+        ),
+    ],
+)
+def test_word_probs_filter_last_utterance(
+    text_list, ans_words, ans_probs, tokenizer: SpokenDialogTokenizer
+):
+    # Use case: use the model in a SDS to infer upcoming TRPs
+    # Assume that we don't add <ts> tokens to the end of the utterances
+    t = tokenizer(text_list, include_end_ts=False, return_tensors="pt")  # (1, N)
+    p = torch.arange(t["input_ids"].shape[-1]).unsqueeze(0)
+    wp = tokenizer.extract_word_probs(t["input_ids"].squeeze(0), p.squeeze(0))
+    ww, pp = tokenizer.word_probs_filter_last_utterance(wp["words"], wp["probs"])
+    assert ww == ans_words, f"Expected {ans_words} but got {ww}"
+    assert pp.tolist() == ans_probs, f"Expected {ans_probs} but got {pp}"
+
+
+@pytest.mark.tokenizer
+@pytest.mark.parametrize(
+    "projections, ans_n_words, ans_prefix",
+    [
+        (
+            [
+                " what's going on<ts> everything",
+                " what's wrong<ts> there's",
+                " what's going on<ts> oh",
+                " what you're doing here<ts>",
+                "<ts> i don't know what",
+                " what's going on<ts> nothing",
+                " what's going on<ts> i",
+                " what's wrong<ts> i don",
+                " what's wrong<ts> i don",
+                " what's going on<ts> i",
+                " what's going on<ts> i",
+                " what's going on you look",
+                " what's going on<ts> my",
+                " what you're doing here<ts>",
+                " about yourself<ts> well i'm",
+                "<ts> i was just wondering why",
+                " what's going on<ts> there",
+                "<ts> oh just a bit of",
+                " what's going on<ts> i",
+                " what's wrong<ts> oh nothing",
+            ],
+            [3, 2, 3, 4, 0, 3, 3, 2, 2, 3, 3, 5, 3, 4, 2, 0, 3, 0, 3, 2],
+            [
+                "everything",
+                "there's",
+                "oh",
+                "i don't know what",
+                "nothing",
+                "i",
+                "i don",
+                "i don",
+                "i",
+                "i",
+                "my",
+                "well i'm",
+                "i was just wondering why",
+                "there",
+                "oh just a bit of",
+                "i",
+                "oh nothing",
+            ],
+        )
+    ],
+)
+def test_prefix_and_word_counter(
+    projections, ans_n_words, ans_prefix, tokenizer: SpokenDialogTokenizer
+):
+    nwords, prefix = tokenizer.get_prefixes(projections)
+    assert nwords == ans_n_words, f"Expected {ans_n_words} but got {nwords}"
+    assert prefix == ans_prefix, f"Expected {ans_prefix} but got {prefix}"
+
+    nw = torch.tensor(nwords)
     assert (
-        p["probs"].tolist() == ans_probs
-    ), f"Expected {ans_probs} but got {p['probs']}"
+        nw <= 2
+    ).sum() == 8, f"Epected 8 prefixes with less than 2 words but got {nw}"
+    assert (
+        nw <= 3
+    ).sum() == 17, f"Epected 17 prefixes with less than 3 words but got {nw}"
+    assert (
+        nw <= 4
+    ).sum() == 19, f"Epected 19 prefixes with less than 4 words but got {nw}"
+    assert (
+        nw <= 5
+    ).sum() == 20, f"Epected 20 prefixes with less than 5 words but got {nw}"
