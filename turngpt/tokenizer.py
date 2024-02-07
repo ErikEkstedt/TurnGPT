@@ -487,22 +487,6 @@ def test():
     t = tokenizer(text_list, include_end_ts=False, return_tensors="pt")  # (1, N)
 
     tokens = [
-        " good because I'm calling",
-        " good<ts> what do you want",
-        "<ts> what do you want",
-        "<ts> what do you want",
-    ]
-
-    def count_ts_tokens(tokens, max=-1):
-        n = 0
-        for fut in tokens:
-            if max > 0:
-                fut = " ".join(fut.split()[:max])
-            if "<ts>" in fut:
-                n += 1
-        return n
-
-    tokens = [
         " what's going on<ts> everything",
         " what's wrong<ts> there's",
         " what's going on<ts> oh",
@@ -525,21 +509,14 @@ def test():
         " what's wrong<ts> oh nothing",
     ]
 
+    t = tokenizer(tokens, include_end_ts=False, return_tensors="pt")["input_ids"]
+
     tokenizer = SpokenDialogTokenizer("gpt2")
-    nwords, prefix = tokenizer.get_prefixes(tokens)
-    N = 2
-    n = 0
-    for fut in gen["tokens"]:
-        print(fut)
-        if N > 0:
-            fut = " ".join(fut.split()[:N])
-        if tokenizer.eos_token in fut:
-            n += 1
-    print(n)
 
     # Get prefix LM stuff
     # Assume that it is the ongoing speech from the user
     # Find first <ts> and the following agent utterance
+    nwords, prefix = tokenizer.get_prefixes(tokens)
 
 
 if __name__ == "__main__":

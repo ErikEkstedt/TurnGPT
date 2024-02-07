@@ -102,11 +102,16 @@ def generate_greedy(
     n_steps=20,
     stop_at_eos=False,
     include_end_ts=False,
+    max_input_length=None,
 ):
     """Generate by sampling"""
     # prepare input for model
     batch = model.tokenizer(context, include_end_ts=include_end_ts, return_tensors="pt")
     batch["attention_mask"] = None
+
+    if max_input_length is not None:
+        batch["input_ids"] = batch["input_ids"][:, -max_input_length:]
+        batch["speaker_ids"] = batch["speaker_ids"][:, -max_input_length:]
 
     batch = {
         k: v.to(model.device) if isinstance(v, torch.Tensor) else v
@@ -175,12 +180,18 @@ def generate_sample(
     stop_at_eos=False,
     n_trajectories=4,
     include_end_ts=False,
+    max_input_length=None,
 ):
     """Generate by sampling"""
 
     # prepare input for model
     batch = model.tokenizer(context, include_end_ts=include_end_ts, return_tensors="pt")
     batch["attention_mask"] = None
+
+    if max_input_length is not None:
+        batch["input_ids"] = batch["input_ids"][:, -max_input_length:]
+        batch["speaker_ids"] = batch["speaker_ids"][:, -max_input_length:]
+
     # sample multiple trajectories at once
     batch = expand_batch(batch, n_trajectories)
 
@@ -358,6 +369,7 @@ def generate(
     stop_at_eos=False,
     strategy="sampling",  # greedy, sampling
     include_end_ts=False,
+    max_input_length=None,
 ):
     if strategy.lower().startswith("s"):
         return generate_sample(
@@ -369,6 +381,7 @@ def generate(
             n_trajectories=n_trajectories,
             stop_at_eos=stop_at_eos,
             include_end_ts=include_end_ts,
+            max_input_length=max_input_length,
         )
     else:
         return generate_greedy(
@@ -377,6 +390,7 @@ def generate(
             n_steps=n_steps,
             stop_at_eos=stop_at_eos,
             include_end_ts=include_end_ts,
+            max_input_length=max_input_length,
         )
 
 
